@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = [
+    "cosmotracer.basin*"
+]
+
+[project]
+name = "cosmotracer"
+version = "0.0.1"
+authors = [
+  { name="Lennart Grimm" },
+]
+description = "A library for performing detrital cosmogenic nuclide studies."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  'numpy<2.0',
+  'scipy==1.12.0',
+  'matplotlib',
+  'pandas',
+  'rasterio',
+  'compress_pickle',
+  'landlab>=2.8.0',
+  'utm',
+  'pyLSD@git+https://github.com/lengri/pyLSD',
+  'shapely',
+  'geopandas'
+]
