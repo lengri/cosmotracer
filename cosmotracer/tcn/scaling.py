@@ -2,10 +2,7 @@ import numpy as np
 import pyLSD as lsd 
 import os 
 
-try:
-    from utm2ll import convert_xy_to_latlon
-except ImportError:
-    from .utm2ll import convert_xy_to_latlon
+from cosmotracer.utils import convert_xy_to_latlon
 
 def calculate_xyz_scaling_factors(
     x : np.ndarray,

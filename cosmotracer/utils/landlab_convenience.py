@@ -87,44 +87,13 @@ def cut_DEM_to_watershed(mg, watershed_mask):
     sum_of_cols = np.sum(mask, axis=0) # this is for jmin and jmax
     sum_of_rows = np.sum(mask, axis=1) # this is for imin, imax
     
-    i_is_zero = np.where(sum_of_rows==0)[0][[0,-1]]
-    j_is_zero = np.where(sum_of_cols==0)[0][[0,-1]]
+    i_is_zero = np.where(sum_of_rows>0)[0][[0,-1]]
+    j_is_zero = np.where(sum_of_cols>0)[0][[0,-1]]
+    i_min = i_is_zero[0]
+    i_max = i_is_zero[1]
+    j_min = j_is_zero[0]
+    j_max = j_is_zero[1]
     
-    print(i_is_zero, j_is_zero)    
-    
-    # find first row where mask occurs:
-    i_min = 0
-    i = 0
-    while i_min == 0:
-        if np.any(mask[i,:]>0):
-            i_min = i
-        i += 1
-        
-    # find last row where mask occurs:
-    i_max = mg.shape[0]-1 
-    i = mg.shape[0]-1 
-    while i_max == mg.shape[0]-1:
-        if np.any(mask[i,:] > 0):
-            i_max = i 
-        i -= 1
-        
-    # find first column where mask occurs: 
-    j_min = 0
-    j = 0
-    while j_min == 0:
-        if np.any(mask[:,j]>0):
-            j_min = j
-        j += 1
-        
-    # find last column where mask occurs:
-    j_max = mg.shape[1]-1
-    j = mg.shape[1]-1
-    while j_max == mg.shape[1]-1:
-        if np.any(mask[:,j]>0):
-            j_max = j
-        j -= 1
-    
-    print(i_min, i_max, j_min, j_max)
     # bounding box is described by (i_min, j_min), (i_max+1, j_max+1)
     dx, dy = mg.dx, mg.dy # ascii actually does not take dx and dy separately...
     # xy_ll = mg.xy_of_lower_left
@@ -144,10 +113,10 @@ def cut_DEM_to_watershed(mg, watershed_mask):
     mg_out = RasterModelGrid(
         zout.shape, xy_spacing=(dx, dy), xy_of_lower_left=(new_x_ll, new_y_ll)
     )
-    zz = mg_out.add_zeros("topographic__elevation", at="node")
-    zz[:] = zout.flatten()
+    mg_out.add_zeros("topographic__elevation", at="node")
+    mg_out.at_node["topographic__elevation"] = zout
     
-    return mg_out, zz
+    return mg_out
     
     
 def find_watershed(mg):
@@ -165,7 +134,7 @@ def find_watershed(mg):
     
     fig, ax = plt.subplots()
     ax.imshow(
-        np.log10(A.reshape(mg.shape)), 
+        np.log10(A.reshape(mg.shape)+1), 
         picker=True,
         origin="lower"
     )
@@ -188,17 +157,28 @@ def find_watershed(mg):
 
 if __name__ == "__main__":
     
-    import os 
     from landlab.io import esri_ascii 
-    from landlab.io import _deprecated_esri_ascii
+    from landlab.components import FlowAccumulator
     
     with open(r"C:\Users\Lennart\OneDrive\Desktop\phd\Work\Sites\EasternSierras\Data\FIELDWORK\Basins\DEMs\B01-01.asc") as asc_file:
-        mg = _deprecated_esri_ascii.read_esri_ascii(
-            asc_file=asc_file,
-            name="topographic__elevation"
-        )
         mg = esri_ascii.load(
             stream=asc_file,
             at="node",
             name="topographic__elevation"
         )
+    
+    fa = FlowAccumulator(
+        mg,
+        flow_director="FlowDirectorD8", 
+        depression_finder="DepressionFinderAndRouter"
+    )
+    fa.run_one_step()
+    
+    mask = find_watershed(mg)
+    mg_out = cut_DEM_to_watershed(mg, mask)
+    
+    plt.imshow(
+        mg_out.at_node["topographic__elevation"].reshape(mg_out.shape),
+        vmin=0
+    )
+    plt.show()
