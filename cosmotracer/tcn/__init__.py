@@ -1,1 +1,1 @@
-from scaling import calculate_xyz_scaling_factors
+from .scaling import calculate_xyz_scaling_factors
