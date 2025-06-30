@@ -82,6 +82,16 @@ def cut_DEM_to_watershed(mg, watershed_mask):
     # first. find the watershed extent...
     mask = watershed_mask.reshape(mg.shape)
     
+    # we can just add up all rows and check the first and last row not zero
+    # and do the same for all columns...
+    sum_of_cols = np.sum(mask, axis=0) # this is for jmin and jmax
+    sum_of_rows = np.sum(mask, axis=1) # this is for imin, imax
+    
+    i_is_zero = np.where(sum_of_rows==0)[0][[0,-1]]
+    j_is_zero = np.where(sum_of_cols==0)[0][[0,-1]]
+    
+    print(i_is_zero, j_is_zero)    
+    
     # find first row where mask occurs:
     i_min = 0
     i = 0
@@ -114,6 +124,7 @@ def cut_DEM_to_watershed(mg, watershed_mask):
             j_max = j
         j -= 1
     
+    print(i_min, i_max, j_min, j_max)
     # bounding box is described by (i_min, j_min), (i_max+1, j_max+1)
     dx, dy = mg.dx, mg.dy # ascii actually does not take dx and dy separately...
     # xy_ll = mg.xy_of_lower_left
@@ -174,3 +185,20 @@ def find_watershed(mg):
     watershed = get_watershed_mask(mg, linear_index)
     
     return watershed
+
+if __name__ == "__main__":
+    
+    import os 
+    from landlab.io import esri_ascii 
+    from landlab.io import _deprecated_esri_ascii
+    
+    with open(r"C:\Users\Lennart\OneDrive\Desktop\phd\Work\Sites\EasternSierras\Data\FIELDWORK\Basins\DEMs\B01-01.asc") as asc_file:
+        mg = _deprecated_esri_ascii.read_esri_ascii(
+            asc_file=asc_file,
+            name="topographic__elevation"
+        )
+        mg = esri_ascii.load(
+            stream=asc_file,
+            at="node",
+            name="topographic__elevation"
+        )
