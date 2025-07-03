@@ -1,1 +1,1 @@
-from .basin import Basin
+from .catchment_model import Basin

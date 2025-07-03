@@ -75,7 +75,7 @@ class Basin(RasterModelGrid):
             
             mg, z = cut_DEM_to_watershed(mg, mask) # this creates a new mg without fa!
             
-        # If the dem is already a processed basin dem, we don't need to do anything except
+        # If the dem is already a processed catchment dem, we don't need to do anything except
         # calculate the flow routing.
         mg.set_nodata_nodes_to_closed(
             z, 
@@ -106,7 +106,7 @@ class Basin(RasterModelGrid):
         
         self.FlowAccumulator = fa
     
-    def calculate_basin_ksn(
+    def calculate_catchment_ksn(
         min_channel_threshold=1e6,
         method : str = "slope-area",
         mn_ratio : float = 0.5,

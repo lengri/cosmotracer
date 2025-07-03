@@ -24,7 +24,7 @@ def calculate_transient_concentration(
     bulk_density : float = 2.7,
     attenuation_length : float = 160,
     nuclide : int = 3,
-    production_pathway : str = "sp", # TODO: Implement this!!!
+    # production_pathway : str = "sp", # TODO: Implement this!!!
     latitudes : Optional[np.ndarray] = None,
     longitudes : Optional[np.ndarray] = None,
     inheritance_concentration : Optional[np.ndarray] = None,
@@ -127,7 +127,7 @@ def calculate_transient_concentration(
 
     where_integrated = np.where(min_dep_at_t>=depth_integration)[0]
 
-    print("Ensuring depth integration")
+    # print("Ensuring depth integration")
     if len(where_integrated) == 0: 
 
         # we haven't reached the depth integration for at least one sample
@@ -167,7 +167,7 @@ def calculate_transient_concentration(
     # are not calculated again.
     xyz_scaling = {}
     
-    print("Scaling factors")
+    # print("Scaling factors")
     scaling_factors = np.zeros(z.shape)
     for i in range(0, z.shape[0]):
         for j in range(0, z.shape[1]):
@@ -191,7 +191,7 @@ def calculate_transient_concentration(
     
     # Since density and att have units of grams and cm, we convert the coldep into cm as well.
     coldep *= 100
-    print("Integrating concentration")
+    # print("Integrating concentration")
     for i in list(range(1, n + 1))[::-1]:
         P0 = prod*scaling_factors[i,:]
         P1 = prod*scaling_factors[i-1,:]
@@ -206,7 +206,6 @@ def calculate_transient_concentration(
         
         integral = lambda x : (-np.exp(-mu * (a_c * x + b_c)) * (a_c * b_p * mu + a_p * (a_c * mu * x + 1))) / (a_c**2 * mu**2)
         production_in_dt = integral(dt) - integral(0)
-        if dt == 1000: print(production_in_dt)
         conc_out += production_in_dt
         conc_out -= dt*lambd*conc_out # decay fraction
     

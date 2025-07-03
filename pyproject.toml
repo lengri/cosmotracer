@@ -2,11 +2,6 @@
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools.packages.find]
-include = [
-    "cosmotracer.basin*"
-]
-
 [project]
 name = "cosmotracer"
 version = "0.0.1"
@@ -22,10 +17,23 @@ dependencies = [
   'matplotlib',
   'pandas',
   'rasterio',
-  'compress_pickle',
   'landlab>=2.8.0',
   'utm',
   'pyLSD@git+https://github.com/lengri/pyLSD',
   'shapely',
   'geopandas'
+]
+
+[tool.setuptools]
+# Tell setuptools where to find the 'cosmotracer' package source
+# The key '.' refers to the top-level package source
+package-dir = {"" = "."} # This explicitly says 'look for packages in this directory'
+                         # and the current directory (where pyproject.toml is)
+                         # is treated as the package root.
+
+# Explicitly list the packages
+packages = [
+  "cosmotracer", 
+  "cosmotracer.basin", 
+  "cosmotracer.tcn"
 ]
