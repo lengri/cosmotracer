@@ -39,7 +39,11 @@ class Basin(RasterModelGrid):
         # initialising the RasterModelGrid.
         
         with open(filepath) as fp:
-            mg, z = esri_ascii.read_esri_ascii(fp, name="topographic__elevation")
+            mg = esri_ascii.load(
+                stream=fp, 
+                name="topographic__elevation"
+            )
+            z = mg.at_node["topographic__elevation"]
         
         if not is_catchment_dem:
             
@@ -73,6 +77,10 @@ class Basin(RasterModelGrid):
             
         # If the dem is already a processed basin dem, we don't need to do anything except
         # calculate the flow routing.
+        mg.set_nodata_nodes_to_closed(
+            z, 
+            nodata
+        )
                 
         # Initialise the RasterModelGrid itself
         lin_ind = np.ravel_multi_index((mg.shape[0]-1, 0), mg.shape)
@@ -95,3 +103,22 @@ class Basin(RasterModelGrid):
             depression_finder="DepressionFinderAndRouter"
         )
         fa.run_one_step()
+        
+        self.FlowAccumulator = fa
+    
+    def calculate_basin_ksn(
+        min_channel_threshold=1e6,
+        method : str = "slope-area",
+        mn_ratio : float = 0.5,
+    ):
+        pass 
+    
+    def parse_sample_concentrations(
+        sample_dict
+    ):
+        pass
+    
+    def parse_tcn_constants(
+        tcn_dict
+    ):
+        pass
