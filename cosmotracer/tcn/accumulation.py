@@ -3,6 +3,16 @@ from pyLSD import apply_LSD_scaling_routine
 
 from typing import Optional
 
+def calculate_steady_state_erosion(
+    concentration : np.ndarray | float,
+    bulk_density : np.ndarray | float,
+    production_rate : np.ndarray | float = 2.7,
+    attenuation_length : np.ndarray | float = 160.,
+    halflife : np.ndarray | float = np.inf
+):
+    e = (attenuation_length / bulk_density) * (production_rate / concentration - np.log(2)/halflife)
+    return e/1e2
+
 def calculate_steady_state_concentration(
     erosion_rate : float,
     bulk_density : float = 2.7,
@@ -25,10 +35,10 @@ def calculate_transient_concentration(
     attenuation_length : float = 160,
     nuclide : int = 3,
     # production_pathway : str = "sp", # TODO: Implement this!!!
-    latitudes : Optional[np.ndarray] = None,
-    longitudes : Optional[np.ndarray] = None,
-    inheritance_concentration : Optional[np.ndarray] = None,
-    throw_integration_error : bool = False
+    latitudes : np.ndarray | None = None,
+    longitudes : np.ndarray | None = None,
+    inheritance_concentration : np.ndarray | None = None,
+    throw_integration_error : bool | None = False
 ):
     """
     This function approximates nuclide concentration of  m samples rising towards 
@@ -191,6 +201,7 @@ def calculate_transient_concentration(
     
     # Since density and att have units of grams and cm, we convert the coldep into cm as well.
     coldep *= 100
+
     # print("Integrating concentration")
     for i in list(range(1, n + 1))[::-1]:
         P0 = prod*scaling_factors[i,:]
@@ -209,7 +220,7 @@ def calculate_transient_concentration(
         conc_out += production_in_dt
         conc_out -= dt*lambd*conc_out # decay fraction
     
-    return conc_out
+    return conc_out, scaling_factors[0,:]*prod
         
 if __name__ == "__main__":
     
