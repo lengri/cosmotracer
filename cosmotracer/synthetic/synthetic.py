@@ -13,19 +13,23 @@ from landlab.components import (
 )
 from landlab import RasterModelGrid
 
+import os, sys
+import ujson
+
 class SPLELM():
     
     def __init__(
         self,
         z_init = None,
-        n_sp = 1.,
-        m_sp = 0.5,
-        K_sp = 1e-5,
+        n_sp : float = 1.,
+        m_sp : float = 0.5,
+        K_sp : float= 1e-5,
         shape : tuple = (100, 100),
         dx : float = 10.,
         xy_of_lower_left : bool = (0., 0.),
         use_cache : bool = False,
-        key : int = 0
+        identifier : int = 0,
+        field_name : str = "topographic__elevation"
     ):
         
         self.n_sp = n_sp
@@ -35,7 +39,15 @@ class SPLELM():
         self.dx = dx
         self.shape = shape
         self.xy_ll = xy_of_lower_left
+        self.cache_allowed = use_cache 
+        self.identifier = identifier
+
+        self.step_info = {
+            "T_total": 0.
+        }
         
+        # create the cachekey
+        self._update_cachekey()
         self._init_grid()
         
         self.fa = FlowAccumulator(
@@ -68,37 +80,41 @@ class SPLELM():
         exhum = (U*dt - (self.z - z_old)) / dt 
         step_info["exhumation"] = exhum
         
-    def save_grid(self, path = None):
-        # If cache, save to cache and to savedir!
-        pass 
-    
-    def load_grid(self, path = None):
-        # If no savedir is provided, try to load from cache!
-        pass 
-    
-    def _init_grid(
-        self
+    def save_grid(
+        self, 
+        path = None,
+        field_name = "topographic__elevation"
     ):
         
-        # if caching is allowed, try to find model with same parameters in cache...
+        # If cache, save to cache and to savedir!
+        if self.cache_allowed:
+            self._update_cachekey()
+            self.cache[self.cachekey] = self.mg.at_node[field_name]
+            self._save_cache()
         
-        # if not and if 
-        ns_grad=0.5
-        ew_grad=0.1
-        noise_mag=500
-        np.random.seed(1)
+        if path is not None:
+            np.savetxt(
+                path, self.mg.at_node[field_name]
+            )
+    
+    def load_grid(
+        self, 
+        path = None,
+        field_name = "topographic__elevation",
+        T_total = None
+    ):
         
-        shape = self.shape
+        # TODO: Change T_total for loading grid!!!
         
-        if self.z is None:
-            z = np.zeros(shape)
-            for i in range(1, shape[1]-1):
-                z[1:-1,i] += np.abs(ns_grad*np.linspace(-self.dx*shape[0]/2,self.dx*shape[0]/2,shape[0]-2))+ew_grad*i*self.dx
-
-            noise = np.random.random((shape[0]-2, shape[1]-2))*noise_mag # crank up the noise            
-            z[1:-1,1:-1] += noise
-            
-            self.z = z 
+        # If no savedir is provided, try to load from cache!
+        
+        if path is None:
+            cache = self._get_cache()
+            key = self._update_cachekey()
+            z = cache[key]
+        else:
+            # try to use np.loadtxt
+            z = np.loadtxt(path)
         
         # set up the landlab rastermodelgrid
         self.mg = RasterModelGrid(
@@ -108,13 +124,115 @@ class SPLELM():
         )
         self.mg.set_closed_boundaries_at_grid_edges(True,True,False,True)
         self.mg.add_zeros(
-            "topographic__elevation", at="node", units="m"
+            field_name, at="node"
         )
-        self.mg.at_node["topographic__elevation"] = self.z
+        self.mg.at_node[field_name] = self.z
         
+    
+    def _init_grid(
+        self,
+        field_name="topographic__elevation"
+    ):
         
+        # if caching is allowed, try to find model with same parameters in cache...
+        self._update_cachekey()
+        self._load_cache()
         
+        if self.z is None:
         
+            try: # Try to get a cached grid...
+                
+                z = self.cache[self.cachekey]
+                
+            except: # If there isn't one, save it here
+            
+                ns_grad=0.5
+                ew_grad=0.1
+                noise_mag=500
+                # np.random.seed(1)
+                
+                shape = self.shape
+                
+                if self.z is None:
+                    z = np.zeros(shape)
+                    for i in range(1, shape[1]-1):
+                        z[1:-1,i] += np.abs(ns_grad*np.linspace(-self.dx*shape[0]/2,self.dx*shape[0]/2,shape[0]-2))+ew_grad*i*self.dx
+
+                    noise = np.random.random((shape[0]-2, shape[1]-2))*noise_mag # crank up the noise            
+                    z[1:-1,1:-1] += noise
+        
+        # save elevations
+        self.z = z 
+        
+        # add them to cache if desired
+        
+        # set up the landlab rastermodelgrid
+        self.mg = RasterModelGrid(
+            shape=self.shape,
+            xy_spacing=self.dx,
+            xy_of_lower_left=self.xy_ll
+        )
+        self.mg.set_closed_boundaries_at_grid_edges(True,True,False,True)
+        self.mg.add_zeros(
+            field_name, at="node", units="m"
+        )
+        self.mg.at_node[field_name] = self.z
+        
+    def _load_cache(
+        self
+    ):
+        if self.cache_allowed:
+            cachedir = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "model_cache.json"
+            )
+            
+            # if this is the first time we look for this cache and it does
+            # not exist, create it now.
+            if not os.path.isfile(cachedir):
+                cache = {}
+                with open(cachedir, "w") as file:
+                    ujson.dump(cache, file)
+            
+            else:
+                with open(cachedir, "w") as file:
+                    cache = ujson.load(file)
+        
+        else:
+            
+            cache = {}
+
+        # we do not save cache to self to avoid increasing the object size...
+        # (NOTE: But we won't save the instance itself, so maybe unnecessary?)
+        
+        self.cache = cache
+    
+    def _save_cache(
+        self
+    ):
+        # if allowed, write json
+        if self.cache_allowed:
+            cachedir = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "model_cache.json"
+            )
+            with open(cachedir, "w") as file:
+                ujson.dump(self.cache, file)
+
+    def _update_cachekey(self):
+        cache_components = [
+            f"dim{self.shape[0]}{self.shape[1]}",
+            f"T{self.step_info["T_total"]}",
+            f"dt{self.step_info["dt"]}",
+            f"U{self.step_info["U"]}",
+            f"K_sp{self.K_sp}",
+            f"n_sp{self.n_sp}",
+            f"m_sp{self.m_sp}",
+            f"key_{self.identifier}"
+        ]
+        self.cachekey = "_".join(cache_components)        
+
+
 class GradientFactory():
     def __init__(self, shape):
         self.shape = shape
