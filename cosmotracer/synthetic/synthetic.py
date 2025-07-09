@@ -7,6 +7,114 @@ from riserfit import (
 )
 import scipy as sp
 
+from landlab.components import (
+    FlowAccumulator,
+    StreamPowerEroder
+)
+from landlab import RasterModelGrid
+
+class SPLELM():
+    
+    def __init__(
+        self,
+        z_init = None,
+        n_sp = 1.,
+        m_sp = 0.5,
+        K_sp = 1e-5,
+        shape : tuple = (100, 100),
+        dx : float = 10.,
+        xy_of_lower_left : bool = (0., 0.),
+        use_cache : bool = False,
+        key : int = 0
+    ):
+        
+        self.n_sp = n_sp
+        self.m_sp = m_sp
+        self.K_sp = K_sp
+        self.z = z_init
+        self.dx = dx
+        self.shape = shape
+        self.xy_ll = xy_of_lower_left
+        
+        self._init_grid()
+        
+        self.fa = FlowAccumulator(
+            self.mg, 
+            flow_director="FlowDirectorD8",
+            depression_finder="DepressionFinderAndRouter"
+        )
+        self.fa.run_one_step()
+        
+        self.spl = StreamPowerEroder(
+            self.mg, K_sp=K_sp, m_sp=m_sp, n_sp=n_sp
+        )
+        
+    def run_one_step(
+        self,
+        U,
+        dt
+    ):
+        
+        step_info = {
+            "dt": dt,
+            "U": U
+        }
+        z_old = self.z.copy()
+        
+        self.z[self.mg.core_nodes] += U*dt
+        self.fa.run_one_step()
+        self.spl.run_one_step(dt=dt)
+        
+        exhum = (U*dt - (self.z - z_old)) / dt 
+        step_info["exhumation"] = exhum
+        
+    def save_grid(self, path = None):
+        # If cache, save to cache and to savedir!
+        pass 
+    
+    def load_grid(self, path = None):
+        # If no savedir is provided, try to load from cache!
+        pass 
+    
+    def _init_grid(
+        self
+    ):
+        
+        # if caching is allowed, try to find model with same parameters in cache...
+        
+        # if not and if 
+        ns_grad=0.5
+        ew_grad=0.1
+        noise_mag=500
+        np.random.seed(1)
+        
+        shape = self.shape
+        
+        if self.z is None:
+            z = np.zeros(shape)
+            for i in range(1, shape[1]-1):
+                z[1:-1,i] += np.abs(ns_grad*np.linspace(-self.dx*shape[0]/2,self.dx*shape[0]/2,shape[0]-2))+ew_grad*i*self.dx
+
+            noise = np.random.random((shape[0]-2, shape[1]-2))*noise_mag # crank up the noise            
+            z[1:-1,1:-1] += noise
+            
+            self.z = z 
+        
+        # set up the landlab rastermodelgrid
+        self.mg = RasterModelGrid(
+            shape=self.shape,
+            xy_spacing=self.dx,
+            xy_of_lower_left=self.xy_ll
+        )
+        self.mg.set_closed_boundaries_at_grid_edges(True,True,False,True)
+        self.mg.add_zeros(
+            "topographic__elevation", at="node", units="m"
+        )
+        self.mg.at_node["topographic__elevation"] = self.z
+        
+        
+        
+        
 class GradientFactory():
     def __init__(self, shape):
         self.shape = shape

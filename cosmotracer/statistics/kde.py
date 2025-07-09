@@ -17,7 +17,8 @@ class GaussianKDE:
         mu : np.ndarray,
         error : np.ndarray,
         weights : np.ndarray | None = None,
-        x : np.ndarray | None = None        
+        x : np.ndarray | None = None,
+        allow_negative : bool = False        
     ):
         self.mu = mu 
         self.error = error 
@@ -26,12 +27,23 @@ class GaussianKDE:
         # check if x has been defined. If not, construct it from 
         # input dataset...
         if x is None:
+            
+            min_val = self.mu.min()-self.error.max()*5
+            # NOTE: This will allow negative values if allow_negative is true
+            # The problem is of course that Gaussian Kernels will always 
+            # be implicitly defined for x < 0 and thus we will "bleed" 
+            # some probability into the negative values. Solution would be
+            # to change the kernel, or be very careful with the bandwidths?
+            if not allow_negative and min_val < 0.:
+                min_val = 0.
             self.x = np.linspace(
-                max(0, self.mu.min()-self.error.max()*5), #TODO: Maybe adapt to allow negative x?
+                min_val, 
                 self.mu.max()+self.error.max()*5,
                 500
             )
+            
         else:
+            # explicitly setting x ignores allow_negative for now.
             self.x = x 
             
         # construct the KDE...
@@ -46,7 +58,6 @@ class GaussianKDE:
             y=self.ykde, x=self.x, initial=0
         )
 
-        
         # Also construct the inverse CDF that returns the x corresponding
         # to a defined probability. 
         self.x_invcdf = self.ycdf.copy()

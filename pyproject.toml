@@ -21,7 +21,8 @@ dependencies = [
   'utm',
   'pyLSD@git+https://github.com/lengri/pyLSD',
   'shapely',
-  'geopandas'
+  'geopandas',
+  'ujson'
 ]
 
 [tool.setuptools]

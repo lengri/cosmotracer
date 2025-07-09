@@ -1,17 +1,52 @@
 import numpy as np
 from pyLSD import apply_LSD_scaling_routine
+import time 
+import ujson, os
 
-from typing import Optional
+def _get_cached_scaling_factor(
+    cache : dict,
+    lat : float,
+    lon : float,
+    alt : float,
+    nuclide : float
+):
+    key = str((round(lat, 5), round(lon, 5), round(alt, 2), nuclide))
+    if key in cache:
+        return cache[key], key 
+    else:
+        return None, key
+
+def _save_scaling_cache(
+    cachedir : str,
+    cache : dict
+):
+    with open(cachedir, "w", encoding="utf-8") as f:
+        ujson.dump(cache, f)
+
+def _load_scaling_cache(
+    cachedir : dict,
+):
+    if os.path.exists(cachedir):
+        with open(cachedir, "r") as f:
+            try:
+                cache = ujson.load(f)
+            except EOFError:
+                cache = {}
+                print("WARNING: Pickle cache corrupted")
+    else:
+        cache = {}
+    
+    return cache    
 
 def calculate_steady_state_erosion(
     concentration : np.ndarray | float,
-    bulk_density : np.ndarray | float,
-    production_rate : np.ndarray | float = 2.7,
+    bulk_density : np.ndarray | float = 2.7,
+    production_rate : np.ndarray | float = 1.,
     attenuation_length : np.ndarray | float = 160.,
     halflife : np.ndarray | float = np.inf
 ):
-    e = (attenuation_length / bulk_density) * (production_rate / concentration - np.log(2)/halflife)
-    return e/1e2
+    e = (attenuation_length / bulk_density) * (production_rate / concentration - np.log(2)/halflife) / 1e2
+    return e
 
 def calculate_steady_state_concentration(
     erosion_rate : float,
@@ -38,7 +73,8 @@ def calculate_transient_concentration(
     latitudes : np.ndarray | None = None,
     longitudes : np.ndarray | None = None,
     inheritance_concentration : np.ndarray | None = None,
-    throw_integration_error : bool | None = False
+    throw_integration_error : bool  = False,
+    write_scaling_cache : bool = False
 ):
     """
     This function approximates nuclide concentration of  m samples rising towards 
@@ -47,12 +83,16 @@ def calculate_transient_concentration(
     Parameters:
     -----------
         exhumation_rates : np.ndarray
-            (n, m) array of exhumation rates for samples at n time steps. Must be in m/yr
+            (n, m) array of exhumation rates for samples at n time steps. Must be in m/yr.
+            This function assumes that the array is sorted from young to old along its first axis.
+            I.e., exhumation_rates[0,:] are the exumation rates present as the sample reaches 
+            the surface.
         dt : float
             The time step size in years.
         surface_elevations : np.ndarray
             (n, m) array of m surface elevation values (in meters) at n time steps.
             This input is used to scale changes in production rate due to surface uplift through time.
+            Assumes that elevations are sorted from modern to old along the first axis.
         depth_integration : float
             Determines over which depth the accumulation of the target nuclide will be calculated.
             The actual total depth value will depend on the step size and exhumation rate, but the used
@@ -95,6 +135,21 @@ def calculate_transient_concentration(
     ### is fast, concentration loss by radioactive decay can be almost completely ignored and thus,
     ### the benefit of using larger total depths outweights the inaccuracy in calculated radioactive decay.
     
+    # Load or create the scaling cache, if desired
+    # NOTE: We still create a cache to avoid repetition in calculating
+    # scaling factors. The difference is in writing it to a file or not...
+    load_cache0 = time.time()
+    if write_scaling_cache:
+        cachedir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "scaling_cache.json"
+        )
+        cache = _load_scaling_cache(cachedir)
+    else:
+        cache = {}
+    load_cache1 = time.time()
+    
+    
     # Some shorthand notations
     exh = exhumation_rates
     z = surface_elevations
@@ -135,8 +190,16 @@ def calculate_transient_concentration(
     # check if we have reached depth_integration.
     min_dep_at_t = np.min(coldep, axis=1)
 
-    where_integrated = np.where(min_dep_at_t>=depth_integration)[0]
-
+    where_integrated = np.where(min_dep_at_t>=depth_integration)[0]   
+    shape_time_start = time.time()
+    
+    #id_print = np.argmin(coldep[-1,:])
+    #print("coldep", coldep[:,id_print])
+    #print("exh per dt", exh_per_t[:,id_print])
+    #print("exh rate", exh[:,id_print])
+    #print("dt", dt)
+    #print("id", id_print)
+    
     # print("Ensuring depth integration")
     if len(where_integrated) == 0: 
 
@@ -172,37 +235,52 @@ def calculate_transient_concentration(
             z = z[:n_cut,:]
             
             n, m = exh.shape               
-
+    shape_time_end = time.time()
     # Calculate the scaling factors here. A small optimisation is that existing pairs of
     # are not calculated again.
-    xyz_scaling = {}
+    scaling_factors = np.zeros(z.shape)
     
     # print("Scaling factors")
-    scaling_factors = np.zeros(z.shape)
+    scaling_time_start = time.time()
+    n_scaling_factors = z.shape[0] * z.shape[1]
+    n_cache_factors_used = 0
     for i in range(0, z.shape[0]):
         for j in range(0, z.shape[1]):
-            key = (lats[j], lons[j], z[i,j])
-            try:
-                xyz_scaling[key]
-                scaling_factors[i,j] = xyz_scaling[key]
-            except:
+            sf, key = _get_cached_scaling_factor(
+                cache, lats[j], lons[j], z[i,j], nuclide
+            )
+            if sf is None:
                 out = apply_LSD_scaling_routine(
                     lat=lats[j], lon=lons[j], alt=z[i,j], nuclide=nuclide
                 )
-                sf = out[_z2iso[nuclide]]
-
-                xyz_scaling[key] = sf[0]
-                scaling_factors[i,j] = sf[0]
+                sf = out[_z2iso[nuclide]][0]
+                cache[key] = sf
+                
+            else:
+                n_cache_factors_used += 1
+            
+            scaling_factors[i,j] = sf
+                
+    # Write the new cache to disc, if desired
+    write_cache0 = time.time()
+    # write cache if wanted and if at least some scaling factors are new...
+    if write_scaling_cache and (n_cache_factors_used != n_scaling_factors):
+        _save_scaling_cache(
+            cachedir, cache
+        )
+    write_cache1 = time.time()
+        
     # duplicate the modern entry for scaling factor so it matches the shape of coldepth
     scaling_factors = np.vstack([scaling_factors[0,:], scaling_factors])
-    
+    scaling_time_end = time.time()
     # Next up: start from the bottom / largest depths and integrate the concentration.
     conc_out = c0
     
     # Since density and att have units of grams and cm, we convert the coldep into cm as well.
     coldep *= 100
-
+    integrate_time_start = time.time()
     # print("Integrating concentration")
+    
     for i in list(range(1, n + 1))[::-1]:
         P0 = prod*scaling_factors[i,:]
         P1 = prod*scaling_factors[i-1,:]
@@ -219,6 +297,15 @@ def calculate_transient_concentration(
         production_in_dt = integral(dt) - integral(0)
         conc_out += production_in_dt
         conc_out -= dt*lambd*conc_out # decay fraction
+    integrate_time_end = time.time()
+    
+    print("Load cache time:", load_cache1-load_cache0)
+    print("Cutting time:", shape_time_end-shape_time_start)
+    print("Scaling time:", scaling_time_end-scaling_time_start)
+    print(f"\tScaling cache used: {n_cache_factors_used}/{n_scaling_factors}")
+    print("Integration time:", integrate_time_end-integrate_time_start)
+    print("Write cache time:", write_cache1-write_cache0)
+    print("Minmax concs:", conc_out.min(), conc_out.max())
     
     return conc_out, scaling_factors[0,:]*prod
         
