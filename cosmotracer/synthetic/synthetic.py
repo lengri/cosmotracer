@@ -13,43 +13,63 @@ from landlab.components import (
 )
 from landlab import RasterModelGrid
 
-import os, sys
-import ujson
+import os, sys, platformdirs
+from pathlib import Path
 
-class SPLELM():
+# For saving files
+from cosmotracer.utils.filing import Cache
+
+# Cache dir and file name. Change only if you know what you're doing...
+    
+class SPLLEM():
     
     def __init__(
         self,
         z_init = None,
         n_sp : float = 1.,
         m_sp : float = 0.5,
-        K_sp : float= 1e-5,
         shape : tuple = (100, 100),
         dx : float = 10.,
         xy_of_lower_left : bool = (0., 0.),
-        use_cache : bool = False,
+        allow_cache : bool = False,
+        fail_on_overwrite : bool = True,
         identifier : int = 0,
         field_name : str = "topographic__elevation"
     ):
         
+        # Constants
         self.n_sp = n_sp
         self.m_sp = m_sp
-        self.K_sp = K_sp
         self.z = z_init
         self.dx = dx
         self.shape = shape
         self.xy_ll = xy_of_lower_left
-        self.cache_allowed = use_cache 
         self.identifier = identifier
 
+        # Dict for step run info
         self.step_info = {
-            "T_total": 0.
+            "T_total": 0.,
+            "dt": None,
+            "U": None,
+            "K_sp": None
         }
+        
+        # Set up the cache
+        self._cache = Cache(
+            allow_cache=allow_cache,
+            fail_on_overwrite=fail_on_overwrite
+        )
         
         # create the cachekey
         self._update_cachekey()
-        self._init_grid()
         
+        # The initiated grid will always be a east-facing basin
+        # unless the user supplies some array to z_init.
+        self._init_grid(field_name=field_name)
+        
+        # Flow accumulator for running the model
+        # DepressionFinderAndRouter will only be
+        # relevant to spin up the model.
         self.fa = FlowAccumulator(
             self.mg, 
             flow_director="FlowDirectorD8",
@@ -57,20 +77,24 @@ class SPLELM():
         )
         self.fa.run_one_step()
         
-        self.spl = StreamPowerEroder(
-            self.mg, K_sp=K_sp, m_sp=m_sp, n_sp=n_sp
-        )
-        
     def run_one_step(
         self,
         U,
+        K_sp,
         dt
     ):
         
-        step_info = {
-            "dt": dt,
-            "U": U
-        }
+        self.step_info["dt"] = dt
+        self.step_info["U"] = U 
+        self.step_info["T_total"] += dt
+        self.step_info["K_sp"] = K_sp
+
+        # We have to create a new SPL in case
+        # K is different...
+        self.spl = StreamPowerEroder(
+            self.mg, K_sp=K_sp, m_sp=self.m_sp, n_sp=self.n_sp
+        )
+
         z_old = self.z.copy()
         
         self.z[self.mg.core_nodes] += U*dt
@@ -78,43 +102,54 @@ class SPLELM():
         self.spl.run_one_step(dt=dt)
         
         exhum = (U*dt - (self.z - z_old)) / dt 
-        step_info["exhumation"] = exhum
+        self.step_info["exhumation"] = exhum
         
     def save_grid(
         self, 
-        path = None,
+        filepath = None,
         field_name = "topographic__elevation"
     ):
         
-        # If cache, save to cache and to savedir!
-        if self.cache_allowed:
-            self._update_cachekey()
-            self.cache[self.cachekey] = self.mg.at_node[field_name]
-            self._save_cache()
-        
-        if path is not None:
+        if filepath is not None:
             np.savetxt(
-                path, self.mg.at_node[field_name]
+                filepath, self.mg.at_node[field_name]
             )
+        
+        self._update_cachekey()
+        self._cache.save_file(
+            filekey=self.cachekey,
+            array=self.mg.at_node[field_name]
+        )
     
     def load_grid(
         self, 
         path = None,
-        field_name = "topographic__elevation",
-        T_total = None
+        T_total = None,
+        U : float = None,
+        K_sp : float = None,
+        dt : float = None
     ):
         
-        # TODO: Change T_total for loading grid!!!
-        
-        # If no savedir is provided, try to load from cache!
-        
-        if path is None:
-            cache = self._get_cache()
-            key = self._update_cachekey()
-            z = cache[key]
+        # If user wants to load grid from txt file, do it here
+        if path is not None:
+            self.z = np.loadtxt(
+                path
+            )
+        # If not: Lookup cache for existing entries
         else:
-            # try to use np.loadtxt
-            z = np.loadtxt(path)
+            self._update_cachekey(
+                T_total=T_total, 
+                U_step=U, 
+                K_step=K_sp,
+                dt_step=dt
+            )
+            self.z = self._cache.load_file(
+                filekey=self.cachekey
+            )
+        
+        # If we haven't assigned any array to self.z, something has gone wrong.
+        if self.z is None:
+            raise Exception("Could not load any model; self.z is None")
         
         # set up the landlab rastermodelgrid
         self.mg = RasterModelGrid(
@@ -122,49 +157,49 @@ class SPLELM():
             xy_spacing=self.dx,
             xy_of_lower_left=self.xy_ll
         )
-        self.mg.set_closed_boundaries_at_grid_edges(True,True,False,True)
-        self.mg.add_zeros(
-            field_name, at="node"
-        )
-        self.mg.at_node[field_name] = self.z
+        self.mg.at_node["topographic__elevation"] = self.z
+        # self.mg.set_closed_boundaries_at_grid_edges(True,True,False,True)
         
+        # we need to create a new 
+        self.fa = FlowAccumulator(
+            self.mg, 
+            flow_director="FlowDirectorD8",
+            depression_finder="DepressionFinderAndRouter"
+        )
+        self.fa.run_one_step()        
     
     def _init_grid(
         self,
         field_name="topographic__elevation"
     ):
         
-        # if caching is allowed, try to find model with same parameters in cache...
-        self._update_cachekey()
-        self._load_cache()
-        
         if self.z is None:
-        
-            try: # Try to get a cached grid...
                 
-                z = self.cache[self.cachekey]
-                
-            except: # If there isn't one, save it here
+            # If we can't find a cached version,
+            # create a new grid here. However, we throw an error if T_total is not zero.
             
-                ns_grad=0.5
-                ew_grad=0.1
-                noise_mag=500
-                # np.random.seed(1)
-                
-                shape = self.shape
-                
-                if self.z is None:
-                    z = np.zeros(shape)
-                    for i in range(1, shape[1]-1):
-                        z[1:-1,i] += np.abs(ns_grad*np.linspace(-self.dx*shape[0]/2,self.dx*shape[0]/2,shape[0]-2))+ew_grad*i*self.dx
+            if self.step_info["T_total"] > 0.:
+                raise Exception("Could not initialise grid: T_total > 0 and no cached run found")
+        
+            ns_grad=0.5
+            ew_grad=0.1
+            noise_mag=500
+            # np.random.seed(1)
+            
+            shape = self.shape
+            
+            if self.z is None:
+                z = np.zeros(shape)
+                for i in range(1, shape[1]-1):
+                    z[1:-1,i] += np.abs(ns_grad*np.linspace(-self.dx*shape[0]/2,self.dx*shape[0]/2,shape[0]-2))+ew_grad*i*self.dx
 
-                    noise = np.random.random((shape[0]-2, shape[1]-2))*noise_mag # crank up the noise            
-                    z[1:-1,1:-1] += noise
-        
-        # save elevations
-        self.z = z 
-        
-        # add them to cache if desired
+                noise = np.random.random((shape[0]-2, shape[1]-2))*noise_mag # crank up the noise            
+                z[1:-1,1:-1] += noise
+
+                z = z.flatten()
+                
+            # save elevations
+            self.z = z 
         
         # set up the landlab rastermodelgrid
         self.mg = RasterModelGrid(
@@ -172,65 +207,37 @@ class SPLELM():
             xy_spacing=self.dx,
             xy_of_lower_left=self.xy_ll
         )
-        self.mg.set_closed_boundaries_at_grid_edges(True,True,False,True)
+        # self.mg.set_closed_boundaries_at_grid_edges(True,True,False,True)
         self.mg.add_zeros(
             field_name, at="node", units="m"
         )
-        self.mg.at_node[field_name] = self.z
-        
-    def _load_cache(
-        self
-    ):
-        if self.cache_allowed:
-            cachedir = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                "model_cache.json"
-            )
-            
-            # if this is the first time we look for this cache and it does
-            # not exist, create it now.
-            if not os.path.isfile(cachedir):
-                cache = {}
-                with open(cachedir, "w") as file:
-                    ujson.dump(cache, file)
-            
-            else:
-                with open(cachedir, "w") as file:
-                    cache = ujson.load(file)
-        
-        else:
-            
-            cache = {}
+        self.mg.at_node[field_name] = self.z        
 
-        # we do not save cache to self to avoid increasing the object size...
-        # (NOTE: But we won't save the instance itself, so maybe unnecessary?)
-        
-        self.cache = cache
-    
-    def _save_cache(
-        self
+    def _update_cachekey(
+        self, 
+        T_total = None,
+        U_step = None,
+        K_step = None,
+        dt_step = None
     ):
-        # if allowed, write json
-        if self.cache_allowed:
-            cachedir = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                "model_cache.json"
-            )
-            with open(cachedir, "w") as file:
-                ujson.dump(self.cache, file)
-
-    def _update_cachekey(self):
+        
+        # Use info in step_info or the directly supplied values
+        t_use = T_total if T_total is not None else self.step_info["T_total"]
+        u_use = U_step if U_step is not None else self.step_info["U"]
+        k_use = K_step if K_step is not None else self.step_info["K_sp"]
+        dt_use = dt_step if dt_step is not None else self.step_info["dt"]        
+            
         cache_components = [
             f"dim{self.shape[0]}{self.shape[1]}",
-            f"T{self.step_info["T_total"]}",
-            f"dt{self.step_info["dt"]}",
-            f"U{self.step_info["U"]}",
-            f"K_sp{self.K_sp}",
+            f"T{t_use}",
+            f"dt{dt_use}",
+            f"U{u_use}",
+            f"K_sp{k_use}",
             f"n_sp{self.n_sp}",
             f"m_sp{self.m_sp}",
-            f"key_{self.identifier}"
+            f"key{self.identifier}"
         ]
-        self.cachekey = "_".join(cache_components)        
+        self.cachekey = "_".join(cache_components) + ".h5"    
 
 
 class GradientFactory():
