@@ -11,4 +11,4 @@ from . import utils
 # Make some central classes and functions available
 # at top level
 from .basin.catchment_model import Basin
-from .synthetic.synthetic import SPLLEM
+from .synthetic.synthetic import CosmoLEM

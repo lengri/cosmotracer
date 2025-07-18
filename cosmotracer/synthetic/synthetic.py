@@ -1,5 +1,6 @@
 import numpy as np
 import riserfit as rf 
+import pyLSD as lsd
 from numba import njit
 from riserfit import (
     DistributionFromInterpolator,
@@ -17,11 +18,20 @@ import os, sys, platformdirs
 from pathlib import Path
 
 # For saving files
-from cosmotracer.utils.filing import Cache
+from cosmotracer.utils.filing import ModelCache
+from cosmotracer.tcn import calculate_xyz_scaling_factors
+from cosmotracer.tcn.accumulation import calculate_steady_state_concentration
 
 # Cache dir and file name. Change only if you know what you're doing...
     
-class SPLLEM():
+class CosmoLEM(RasterModelGrid):
+    
+    """
+    A class for modelling landscape evolution using the Stream-Power-Law
+    and tracking nuclide concentrations from that landscape.
+    
+    Based on landlab's RasterModelGrid
+    """
     
     def __init__(
         self,
@@ -40,9 +50,9 @@ class SPLLEM():
         # Constants
         self.n_sp = n_sp
         self.m_sp = m_sp
-        self.z = z_init
-        self.dx = dx
-        self.shape = shape
+        self._z = z_init
+        self.xy_spacing = dx
+        self.grid_shape = shape
         self.xy_ll = xy_of_lower_left
         self.identifier = identifier
 
@@ -55,27 +65,49 @@ class SPLLEM():
         }
         
         # Set up the cache
-        self._cache = Cache(
+        self._cache = ModelCache(
             allow_cache=allow_cache,
             fail_on_overwrite=fail_on_overwrite
         )
         
-        # create the cachekey
-        self._update_cachekey()
-        
         # The initiated grid will always be a east-facing basin
         # unless the user supplies some array to z_init.
+        super().__init__(
+            shape=shape,
+            xy_spacing=dx,
+            xy_of_lower_left=xy_of_lower_left
+        )
         self._init_grid(field_name=field_name)
+        
+        # create the cachekey
+        self._update_cachekey()
         
         # Flow accumulator for running the model
         # DepressionFinderAndRouter will only be
         # relevant to spin up the model.
         self.fa = FlowAccumulator(
-            self.mg, 
+            self, 
             flow_director="FlowDirectorD8",
             depression_finder="DepressionFinderAndRouter"
         )
         self.fa.run_one_step()
+        
+        # initialise fields for cosmogenic nuclide stuff
+        
+        # Lat, lon, elev scaling factors
+        self.add_zeros("tcn__scaling_sp")
+        self.add_zeros("tcn__scaling_eth")
+        self.add_zeros("tcn__scaling_th")
+        self.add_zeros("tcn__scaling_totmu")
+        self.add_zeros("tcn__scaling_nmu")
+        self.add_zeros("tcn__scaling_pmu")
+        self.add_zeros("tcn__concentration")
+        
+        # Topo shielding
+        self.add_ones("tcn__topographic_shielding")
+        
+        # Concentrations
+        self.add_zeros("tcn__nuclide_concentration")
         
     def run_one_step(
         self,
@@ -92,17 +124,17 @@ class SPLLEM():
         # We have to create a new SPL in case
         # K is different...
         self.spl = StreamPowerEroder(
-            self.mg, K_sp=K_sp, m_sp=self.m_sp, n_sp=self.n_sp
+            self, K_sp=K_sp, m_sp=self.m_sp, n_sp=self.n_sp
         )
 
-        z_old = self.z.copy()
+        z_old = self._z.copy()
         
-        self.z[self.mg.core_nodes] += U*dt
+        self._z[self.core_nodes] += U*dt
         self.fa.run_one_step()
         self.spl.run_one_step(dt=dt)
         
-        exhum = (U*dt - (self.z - z_old)) / dt 
-        self.step_info["exhumation"] = exhum
+        exhum = (U*dt - (self._z - z_old)) / dt 
+        self.step_info["exhumation_rate"] = exhum
         
     def save_grid(
         self, 
@@ -112,13 +144,13 @@ class SPLLEM():
         
         if filepath is not None:
             np.savetxt(
-                filepath, self.mg.at_node[field_name]
+                filepath, self.at_node[field_name]
             )
         
         self._update_cachekey()
         self._cache.save_file(
             filekey=self.cachekey,
-            array=self.mg.at_node[field_name]
+            array=self.at_node[field_name]
         )
     
     def load_grid(
@@ -132,7 +164,7 @@ class SPLLEM():
         
         # If user wants to load grid from txt file, do it here
         if path is not None:
-            self.z = np.loadtxt(
+            self._z = np.loadtxt(
                 path
             )
         # If not: Lookup cache for existing entries
@@ -143,26 +175,19 @@ class SPLLEM():
                 K_step=K_sp,
                 dt_step=dt
             )
-            self.z = self._cache.load_file(
+            self._z = self._cache.load_file(
                 filekey=self.cachekey
             )
         
-        # If we haven't assigned any array to self.z, something has gone wrong.
-        if self.z is None:
-            raise Exception("Could not load any model; self.z is None")
+        # If we haven't assigned any array to self._z, something has gone wrong.
+        if self._z is None:
+            raise Exception("Could not load any model; self._z is None")
         
-        # set up the landlab rastermodelgrid
-        self.mg = RasterModelGrid(
-            shape=self.shape,
-            xy_spacing=self.dx,
-            xy_of_lower_left=self.xy_ll
-        )
-        self.mg.at_node["topographic__elevation"] = self.z
-        # self.mg.set_closed_boundaries_at_grid_edges(True,True,False,True)
+        self.at_node["topographic__elevation"] = self._z
         
-        # we need to create a new 
+        # we need to create a new FA
         self.fa = FlowAccumulator(
-            self.mg, 
+            self, 
             flow_director="FlowDirectorD8",
             depression_finder="DepressionFinderAndRouter"
         )
@@ -173,7 +198,7 @@ class SPLLEM():
         field_name="topographic__elevation"
     ):
         
-        if self.z is None:
+        if self._z is None:
                 
             # If we can't find a cached version,
             # create a new grid here. However, we throw an error if T_total is not zero.
@@ -185,10 +210,10 @@ class SPLLEM():
             ew_grad=0.1
             noise_mag=500
             # np.random.seed(1)
-            
+
             shape = self.shape
-            
-            if self.z is None:
+
+            if self._z is None:
                 z = np.zeros(shape)
                 for i in range(1, shape[1]-1):
                     z[1:-1,i] += np.abs(ns_grad*np.linspace(-self.dx*shape[0]/2,self.dx*shape[0]/2,shape[0]-2))+ew_grad*i*self.dx
@@ -199,19 +224,13 @@ class SPLLEM():
                 z = z.flatten()
                 
             # save elevations
-            self.z = z 
+            self._z = z 
         
-        # set up the landlab rastermodelgrid
-        self.mg = RasterModelGrid(
-            shape=self.shape,
-            xy_spacing=self.dx,
-            xy_of_lower_left=self.xy_ll
-        )
-        # self.mg.set_closed_boundaries_at_grid_edges(True,True,False,True)
-        self.mg.add_zeros(
+        # self.set_closed_boundaries_at_grid_edges(True,True,False,True)
+        self.add_zeros(
             field_name, at="node", units="m"
         )
-        self.mg.at_node[field_name] = self.z        
+        self.at_node[field_name] = self._z        
 
     def _update_cachekey(
         self, 
@@ -237,8 +256,60 @@ class SPLLEM():
             f"m_sp{self.m_sp}",
             f"key{self.identifier}"
         ]
-        self.cachekey = "_".join(cache_components) + ".h5"    
-
+        self.cachekey = "_".join(cache_components) + ".h5"  
+    
+    def calculate_TCN_topo_scaling(
+        self
+    ):
+        pass 
+    
+    def calculate_TCN_xyz_scaling(
+        self, epsg, nuclide, opt_args : dict = {}
+    ):
+        scaling = calculate_xyz_scaling_factors(
+            x=self.x_of_node[self.core_nodes],
+            y=self.y_of_node[self.core_nodes],
+            z=self.at_node["topographic__elevation"][self.core_nodes],
+            epsg=epsg,
+            nuclide=nuclide,
+            **opt_args
+        )
+        
+        self.at_node["tcn__scaling_sp"][self.core_nodes] = scaling["sp"]
+        self.at_node["tcn__scaling_eth"][self.core_nodes] = scaling["eth"]
+        self.at_node["tcn__scaling_th"][self.core_nodes] = scaling["th"]
+        self.at_node["tcn__scaling_totmu"][self.core_nodes] = scaling["totmu"]
+        self.at_node["tcn__scaling_nmu"][self.core_nodes] = scaling["nmu"]
+        self.at_node["tcn__scaling_pmu"][self.core_nodes] = scaling["pmu"]
+    
+    def calculate_TCN_steady_state_concentration(
+        self,
+        bulk_density : float = 2.7,
+        production_rate_SLHL : float = 1.,
+        attenuation_length : float = 160.,
+        halflife : float = np.inf
+    ):
+        
+        # NOTE: Assuming steady state erosion, this will cause minor errors in 
+        # transient basins. Maybe I'll implement an external function for
+        # transient calculations, but that would require storing each exhumation
+        # and elevation time steps relevant for the transient concentration
+        # calculations.
+        
+        # NOTE: For now we just use the spallogenic component for the total concentration.
+        # in the future, it should be a sum over the individual production histories 
+        # (sp, mu, eth, th).
+        
+        xyz_scaling = production_rate_SLHL*self.at_node["tcn__scaling_sp"][self.core_nodes]
+        topo_shielding = self.at_node["tcn__topographic_shielding"][self.core_nodes]
+        prod = xyz_scaling*topo_shielding*production_rate_SLHL
+        self.at_node["tcn__nuclide_concentration"][self.core_nodes] = calculate_steady_state_concentration(
+            erosion_rate = self.step_info["exhumation_rate"][self.core_nodes],
+            bulk_density=bulk_density,
+            production_rate=prod,
+            attenuation_length=attenuation_length,
+            halflife=halflife
+        )
 
 class GradientFactory():
     def __init__(self, shape):

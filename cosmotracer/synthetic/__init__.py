@@ -1,1 +1,1 @@
-from .synthetic import SPLLEM
+from .synthetic import CosmoLEM

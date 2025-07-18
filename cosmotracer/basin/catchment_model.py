@@ -19,7 +19,9 @@ from landlab.components import (
 )
 import numpy as np
 
-class Basin(RasterModelGrid):
+from cosmotracer.synthetic.synthetic import CosmoLEM
+
+class Basin(CosmoLEM):
     
     def __init__(
         self,
