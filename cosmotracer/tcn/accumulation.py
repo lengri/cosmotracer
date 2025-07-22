@@ -1,42 +1,9 @@
 import numpy as np
-from pyLSD import apply_LSD_scaling_routine
 import time 
-import ujson, os
+import os
 
-def _get_cached_scaling_factor(
-    cache : dict,
-    lat : float,
-    lon : float,
-    alt : float,
-    nuclide : float
-):
-    key = str((round(lat, 5), round(lon, 5), round(alt, 2), nuclide))
-    if key in cache:
-        return cache[key], key 
-    else:
-        return None, key
+from cosmotracer.tcn import calculate_xyz_scaling_factors
 
-def _save_scaling_cache(
-    cachedir : str,
-    cache : dict
-):
-    with open(cachedir, "w", encoding="utf-8") as f:
-        ujson.dump(cache, f)
-
-def _load_scaling_cache(
-    cachedir : dict,
-):
-    if os.path.exists(cachedir):
-        with open(cachedir, "r") as f:
-            try:
-                cache = ujson.load(f)
-            except EOFError:
-                cache = {}
-                print("WARNING: Pickle cache corrupted")
-    else:
-        cache = {}
-    
-    return cache    
 
 def calculate_steady_state_erosion(
     concentration : np.ndarray | float,
@@ -70,11 +37,12 @@ def calculate_transient_concentration(
     attenuation_length : float = 160,
     nuclide : int = 3,
     # production_pathway : str = "sp", # TODO: Implement this!!!
-    latitudes : np.ndarray | None = None,
-    longitudes : np.ndarray | None = None,
+    northings : np.ndarray | None = None,
+    eastings : np.ndarray | None = None,
+    epsg : int | None = None,
     inheritance_concentration : np.ndarray | None = None,
     throw_integration_error : bool  = False,
-    write_scaling_cache : bool = False
+    allow_cache : bool = False
 ):
     """
     This function approximates nuclide concentration of  m samples rising towards 
@@ -115,10 +83,12 @@ def calculate_transient_concentration(
         nuclide : int
             The mass number of the isotope. Needed to calculate the scaling factors according to Lifton et al. (2014).
             Default is 3 (3He).
-        latitudes : np.ndarray
-            Optional input for latitudes (in decimal degrees). If None, defaults to 90.0°.
-        longitudes : np.ndarray
-            Optional input for longitudes (in decimal degrees). If None, defaults to 0.0°.
+        northing : np.ndarray
+            Optional input for easting (in m). If None, defaults to 0.
+        easting : np.ndarray
+            Optional input for northing (in m). If None, defaults to 0.
+        epsg : int
+            The epsg code. Assumes that it is a UTM coordinate system.
         inheritance_concentration: np.ndarray
             Initial inherited concentration of the target nuclide in at/g. If None, defaults to 
             0 at/g.
@@ -135,26 +105,9 @@ def calculate_transient_concentration(
     ### is fast, concentration loss by radioactive decay can be almost completely ignored and thus,
     ### the benefit of using larger total depths outweights the inaccuracy in calculated radioactive decay.
     
-    # Load or create the scaling cache, if desired
-    # NOTE: We still create a cache to avoid repetition in calculating
-    # scaling factors. The difference is in writing it to a file or not...
-    load_cache0 = time.time()
-    if write_scaling_cache:
-        cachedir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "scaling_cache.json"
-        )
-        cache = _load_scaling_cache(cachedir)
-    else:
-        cache = {}
-    load_cache1 = time.time()
-    
-    
     # Some shorthand notations
     exh = exhumation_rates
     z = surface_elevations
-    lats = latitudes
-    lons = longitudes
     prod = production_rate
     lambd = np.log(2) / halflife
     c0 = inheritance_concentration
@@ -170,10 +123,10 @@ def calculate_transient_concentration(
     n, m = exh.shape
     
     # Defaults for latitude, longitude
-    if lats is None:
-        lats = np.ones(m)*90.
-    if lons is None:
-        lons = np.zeros(m)
+    if northings is None:
+        northings = np.zeros(m)
+    if eastings is None:
+        eastings = np.zeros(m)
         
     # Defualts for inheritance
     if c0 is None:
@@ -234,7 +187,8 @@ def calculate_transient_concentration(
             coldep = coldep[:n_cut+1,:]
             z = z[:n_cut,:]
             
-            n, m = exh.shape               
+            n, m = exh.shape    
+                       
     shape_time_end = time.time()
     # Calculate the scaling factors here. A small optimisation is that existing pairs of
     # are not calculated again.
@@ -242,37 +196,25 @@ def calculate_transient_concentration(
     
     # print("Scaling factors")
     scaling_time_start = time.time()
-    n_scaling_factors = z.shape[0] * z.shape[1]
-    n_cache_factors_used = 0
+    
+    # loop over each row in z and calculat the scaling factors
     for i in range(0, z.shape[0]):
-        for j in range(0, z.shape[1]):
-            sf, key = _get_cached_scaling_factor(
-                cache, lats[j], lons[j], z[i,j], nuclide
-            )
-            if sf is None:
-                out = apply_LSD_scaling_routine(
-                    lat=lats[j], lon=lons[j], alt=z[i,j], nuclide=nuclide
-                )
-                sf = out[_z2iso[nuclide]][0]
-                cache[key] = sf
-                
-            else:
-                n_cache_factors_used += 1
-            
-            scaling_factors[i,j] = sf
-                
-    # Write the new cache to disc, if desired
-    write_cache0 = time.time()
-    # write cache if wanted and if at least some scaling factors are new...
-    if write_scaling_cache and (n_cache_factors_used != n_scaling_factors):
-        _save_scaling_cache(
-            cachedir, cache
+        
+        out = calculate_xyz_scaling_factors(
+            x=eastings,
+            y=northings,
+            z=z[i,:],
+            epsg=epsg,
+            nuclide=_z2iso[nuclide],
+            verbose=False,
+            allow_cache=allow_cache
         )
-    write_cache1 = time.time()
+        scaling_factors[i,:] = out[:,0]
         
     # duplicate the modern entry for scaling factor so it matches the shape of coldepth
     scaling_factors = np.vstack([scaling_factors[0,:], scaling_factors])
     scaling_time_end = time.time()
+    
     # Next up: start from the bottom / largest depths and integrate the concentration.
     conc_out = c0
     
@@ -299,19 +241,52 @@ def calculate_transient_concentration(
         conc_out -= dt*lambd*conc_out # decay fraction
     integrate_time_end = time.time()
     
-    print("Load cache time:", load_cache1-load_cache0)
-    print("Cutting time:", shape_time_end-shape_time_start)
-    print("Scaling time:", scaling_time_end-scaling_time_start)
-    print(f"\tScaling cache used: {n_cache_factors_used}/{n_scaling_factors}")
-    print("Integration time:", integrate_time_end-integrate_time_start)
-    print("Write cache time:", write_cache1-write_cache0)
-    print("Minmax concs:", conc_out.min(), conc_out.max())
+    if False:
+        print("Cutting time:", shape_time_end-shape_time_start)
+        print("Scaling time:", scaling_time_end-scaling_time_start)
+        print("Integration time:", integrate_time_end-integrate_time_start)
+        print("Minmax concs:", conc_out.min(), conc_out.max())
     
     return conc_out, scaling_factors[0,:]*prod
         
 if __name__ == "__main__":
     
-    pass
+    # test the transient concentration accumulation...
+     exhum = np.ones((100, 2))*1e-3
+     z = np.ones(exhum.shape)+500
+     PSLHL = 116.
+     northing = np.linspace(3924450.0, 3924450.0+50000, exhum.shape[1])
+     easting = np.linspace(344730.0, 344730.0+50000, exhum.shape[1])
+     
+     calculate_transient_concentration(
+         exhumation_rates=exhum,
+         dt=1000,
+         surface_elevations=z,
+         production_rate=PSLHL,
+         northings=northing,
+         eastings=easting,
+         epsg=32611,
+         allow_cache=True,
+         depth_integration=10.
+     )
+     
+     sf = calculate_xyz_scaling_factors(
+         x=easting,
+         y=northing,
+         z=z[-1,:],
+         epsg=32611,
+         nuclide="He",
+         allow_cache=True
+     )[:,0]
+     
+     ss_conc = calculate_steady_state_concentration(
+         erosion_rate=exhum[0,:],
+         production_rate=116.*sf
+     )
+     print(ss_conc)
+     
+     
+     print(sf)
                 
             
             

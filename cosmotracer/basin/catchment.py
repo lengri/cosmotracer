@@ -87,15 +87,16 @@ class Basin(CosmoLEM):
         # Initialise the RasterModelGrid itself
         lin_ind = np.ravel_multi_index((mg.shape[0]-1, 0), mg.shape)
         super().__init__(
-            mg.shape, 
+            z_init=z,
+            shape=mg.shape, 
             xy_spacing=(mg.dx, mg.dy), 
             xy_of_lower_left=(
                 mg.x_of_node[lin_ind],
                 mg.y_of_node[lin_ind]
             )
         )   
-        self.add_zeros("topographic__elevation", at="node")
-        self.at_node["topographic__elevation"] = z[:]
+        #self.add_zeros("topographic__elevation", at="node")
+        #self.at_node["topographic__elevation"] = z[:]
         self.set_nodata_nodes_to_closed(z, nodata)
         
         # run the flow accumulator (again) like usual

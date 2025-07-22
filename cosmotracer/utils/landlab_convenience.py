@@ -98,6 +98,9 @@ def cut_DEM_to_watershed(mg, watershed_mask):
     dx, dy = mg.dx, mg.dy # ascii actually does not take dx and dy separately...
     # xy_ll = mg.xy_of_lower_left
     
+    if dx != dy:
+        raise Exception("Cell side lengths dx, dy must be equal!")
+    
     lin_ind = np.ravel_multi_index((i_min, j_min), mg.shape)
     new_x_ll = mg.x_of_node[lin_ind]
     new_y_ll = mg.y_of_node[lin_ind]    
