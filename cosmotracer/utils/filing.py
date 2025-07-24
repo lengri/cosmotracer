@@ -98,7 +98,7 @@ class ModelCache():
     def save_file(
         self, filekey, array
     ):
-        
+
         # do nothing here as well
         if not self.cache_allowed:
             return None
@@ -130,7 +130,7 @@ class ScalingCache():
         round_level : int = 1,
         scaling_param_key : str = "He"
     ):
-        
+
         # Global options for this Cache instance
         self.cache_allowed = allow_cache
         self.round_level = round_level
@@ -170,7 +170,7 @@ class ScalingCache():
                 with open(self.filepath, "r") as f:
                     self.cache = ujson.load(f)
             except ujson.JSONDecodeError: # empty file...
-                return {}
+                self.cache = {}
     
     def save_cache(
         self

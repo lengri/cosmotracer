@@ -151,6 +151,9 @@ class CosmoLEM(RasterModelGrid):
         # Concentrations
         self.add_zeros("tcn__nuclide_concentration")
         
+        # The exhumation rates
+        self.add_zeros("exhumation_rate")
+        
     def run_one_step(
         self,
         U : float,
@@ -161,8 +164,9 @@ class CosmoLEM(RasterModelGrid):
         """
         Advances the LEM by one step. Information about this step is stored in a small dict,
         self.step_info. This dict stores the time step size ("dt"), the imposed uplift rate ("U"),
-        the total elapsed model run time ("T_total"), the imposed erodibility ("K_sp"), and the
-        resulting exhumation rate calculated during the time step ("exhumation_rate").
+        the total elapsed model run time ("T_total"), and the imposed erodibility ("K_sp"). 
+        The resulting exhumation rate calculated during the time step is stored in 
+        self.at_node["exhumation_rate"].
         
         Parameters:
         -----------
@@ -193,7 +197,7 @@ class CosmoLEM(RasterModelGrid):
         self.spl.run_one_step(dt=dt)
         
         exhum = (U*dt - (self._z - z_old)) / dt 
-        self.step_info["exhumation_rate"] = exhum
+        self.at_node["exhumation_rate"] = exhum
         
     def save_grid(
         self, 
@@ -441,7 +445,7 @@ class CosmoLEM(RasterModelGrid):
         """
         Calculates the expected TCN concentration at each cell assuming steady-state
         erosion rates over the depth integration time scale. Erosion rate information
-        is taken from self.step_info("exhumation_rate").
+        is taken from self.at_node["exhumation_rate"].
         If you are interested in calculating concentrations for transient (changing)
         erosion rates, work with cosmotracer.tcn.calculate_transient_concentration().
         
@@ -473,7 +477,7 @@ class CosmoLEM(RasterModelGrid):
         prod = xyz_scaling*topo_shielding*production_rate_SLHL
         
         self.at_node["tcn__nuclide_concentration"][self.core_nodes] = calculate_steady_state_concentration(
-            erosion_rate = self.step_info["exhumation_rate"][self.core_nodes],
+            erosion_rate = self.at_node["exhumation_rate"][self.core_nodes],
             bulk_density=bulk_density,
             production_rate=prod,
             attenuation_length=attenuation_length,
@@ -484,7 +488,8 @@ class CosmoLEM(RasterModelGrid):
         self, 
         n : int = 100,
         seed : int = 1,
-        weights : np.ndarray | None = None
+        weights : np.ndarray | None = None,
+        valid_ids : np.ndarray | None = None
     ):
         """
         Chooses n core nodes id for easy access and tracking "random samples"
@@ -498,22 +503,32 @@ class CosmoLEM(RasterModelGrid):
                 The numpy random seed.
             weights : np.ndarray | None
                 The weights associated with each possible id. Must have the same
-                shape as self.core_nodes. Default is an unweighted sample.
+                shape as self.core_nodes or the array supplied to valid_ids. 
+                Default is an unweighted sample.
+            valid_ids : np._ndarray | None
+                An array of valid ids to sample from. If left as None, it is set
+                to self.core_nodes.
                 
         """
         # set the seed
         np.random.seed(seed)
-        
+            
+        # deal with the valid ids
+        if valid_ids is None:
+            ids = self.core_nodes
+        else:
+            ids = valid_ids
+            
         # deal with weights
         if weights is None:
-            weights = np.ones(len(self.core_nodes))/len(self.core_nodes)
+            weights = np.ones(len(ids))/len(ids)
         else:
             # ensure that weights are normalised
             weights /= np.sum(weights)
             
         # draw a random sample
         self.tracked_nodes = np.random.choice(
-            self.core_nodes, 
+            ids, 
             replace=False,
             size=n,
             p=weights
