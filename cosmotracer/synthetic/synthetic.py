@@ -20,7 +20,10 @@ from pathlib import Path
 # For saving files
 from cosmotracer.utils.filing import ModelCache
 from cosmotracer.tcn import calculate_xyz_scaling_factors
-from cosmotracer.tcn.accumulation import calculate_steady_state_concentration
+from cosmotracer.tcn.accumulation import (
+    calculate_steady_state_concentration,
+    calculate_transient_concentration
+)
 
 # Cache dir and file name. Change only if you know what you're doing...
     
@@ -51,7 +54,8 @@ class CosmoLEM(RasterModelGrid):
         xy_of_lower_left : bool = (0., 0.),
         allow_cache : bool = False,
         fail_on_overwrite : bool = True,
-        identifier : int | str = 0
+        identifier : int | str = 0,
+        epsg : int | None = None
     ) -> None:
         
         """
@@ -86,6 +90,9 @@ class CosmoLEM(RasterModelGrid):
                 be overwritten by a new call of self.save_grid(). Default is True.
             identifier : int | str
                 An additional identifier that can be added to the file name of the cached file.
+            epsg : int | None
+                The EPSG code for the coordinate system. This has to be defined when tracking transient
+                concentrations.
 
         """ 
         
@@ -97,6 +104,7 @@ class CosmoLEM(RasterModelGrid):
         self.grid_shape = shape
         self.xy_ll = xy_of_lower_left
         self.identifier = identifier
+        self.epsg = epsg
 
         # Dict for step run info
         self.step_info = {
@@ -153,6 +161,12 @@ class CosmoLEM(RasterModelGrid):
         
         # The exhumation rates
         self.add_zeros("exhumation_rate")
+        
+        # Node tracking
+        self.tracked_nodes = None
+        self.tracked_exhumation = None
+        self.tracked_z = None
+        self.tracked_transient_concentrations = None
         
     def run_one_step(
         self,
@@ -396,7 +410,6 @@ class CosmoLEM(RasterModelGrid):
     
     def calculate_TCN_xyz_scaling(
         self, 
-        epsg : int, 
         nuclide : str, 
         opt_args : dict = {}
     ):
@@ -423,7 +436,7 @@ class CosmoLEM(RasterModelGrid):
             x=self.x_of_node[self.core_nodes],
             y=self.y_of_node[self.core_nodes],
             z=self.at_node["topographic__elevation"][self.core_nodes],
-            epsg=epsg,
+            epsg=self.epsg,
             nuclide=nuclide,
             **opt_args
         )
@@ -483,8 +496,91 @@ class CosmoLEM(RasterModelGrid):
             attenuation_length=attenuation_length,
             halflife=halflife
         )
+
+    def _track_exhumation_z(self):
+        
+        # NOTE: Splitting this off into its own function allows us to 
+        # track exhumation and z even if we are not really using it.
+        # we can then call calculate_TCN_transient_concentration after
+        # user-defined time steps and only calculate these concentrations
+        # every now and then (whenever relevant).
+        
+        # By default, calculate_TCN_transient_concentration calls _track_exhumation_z
+        # anyways...
+        # we need to have defined self.tracked_nodes
+        if self.tracked_nodes is None:
+            raise Exception("self.tracked_nodes must be a 1d array of ids.")
+        
+        # check if the arrays already exist. If not, create them now.
+        if self.tracked_exhumation is None and self.tracked_z is None:
+            self.tracked_exhumation = self.at_node["exhumation_rate"][self.tracked_nodes].reshape(1,len(self.tracked_nodes))
+            self.tracked_z = self.at_node["topographic__elevation"][self.tracked_nodes].reshape(1,len(self.tracked_nodes))
     
-    def track_n_points(
+        else:
+            # NOTE: The stacking is such that the newest step is always at position [n] 
+            # of the 2d array. This matches the order expected by 
+            # calculate_transient_concentration.
+            self.tracked_exhumation = np.vstack(
+                (
+                    self.tracked_exhumation,
+                    self.at_node["exhumation_rate"][self.tracked_nodes]
+                    
+                )
+            )
+            self.tracked_z = np.vstack(
+                (
+                    self.tracked_z,
+                    self.at_node["topographic__elevation"][self.tracked_nodes]
+                    
+                )
+            )
+            
+            
+    def calculate_TCN_transient_concentration(
+        self,
+        bulk_density : float = 2.7,
+        production_rate_SLHL : float = 1.,
+        attenuation_length : float = 160.,
+        halflife : float = np.inf,
+        depth_integration : float = 1.,
+        nuclide : int = 3
+    ):
+        """
+        Calculate transient concentrations as the model is running.
+        """
+        # we create/stack arrays with surface elevations and 
+        # erosion rate sof  the points of interest.
+        self._track_exhumation_z()
+        
+        # with this data, we can calculate transient concentrations for the current time-step.
+        tracked_concs, _ = calculate_transient_concentration(
+            exhumation_rates=self.tracked_exhumation,
+            dt=self.step_info["dt"],
+            surface_elevations=self.tracked_z,
+            depth_integration=depth_integration,
+            production_rate=production_rate_SLHL,
+            halflife=halflife,
+            bulk_density=bulk_density,
+            attenuation_length=attenuation_length,
+            nuclide=nuclide,
+            northings=self.y_of_node[self.tracked_nodes],
+            eastings=self.x_of_node[self.tracked_nodes],
+            epsg=self.epsg,
+            allow_cache=True
+        )
+        
+        if self.tracked_transient_concentrations is None:
+            self.tracked_transient_concentrations = tracked_concs.reshape(1,len(self.tracked_nodes))
+        else:
+            self.tracked_transient_concentrations = np.vstack(
+                (
+                    self.tracked_transient_concentrations,
+                    tracked_concs
+                    
+                )
+            )
+    
+    def track_nodes(
         self, 
         n : int = 100,
         seed : int = 1,

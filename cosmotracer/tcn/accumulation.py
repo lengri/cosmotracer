@@ -43,7 +43,7 @@ def calculate_transient_concentration(
     inheritance_concentration : np.ndarray | None = None,
     throw_integration_error : bool  = False,
     allow_cache : bool = False
-):
+) -> tuple[np.ndarray, np.ndarray]:
     """
     This function approximates nuclide concentration of  m samples rising towards 
     the surface at variable velocities (exhumation rates). 
@@ -52,15 +52,15 @@ def calculate_transient_concentration(
     -----------
         exhumation_rates : np.ndarray
             (n, m) array of exhumation rates for samples at n time steps. Must be in m/yr.
-            This function assumes that the array is sorted from young to old along its first axis.
-            I.e., exhumation_rates[0,:] are the exumation rates present as the sample reaches 
+            This function assumes that the array is sorted from old to young along its first axis.
+            I.e., exhumation_rates[n,:] are the exumation rates present as the sample reaches 
             the surface.
         dt : float
             The time step size in years.
         surface_elevations : np.ndarray
             (n, m) array of m surface elevation values (in meters) at n time steps.
             This input is used to scale changes in production rate due to surface uplift through time.
-            Assumes that elevations are sorted from modern to old along the first axis.
+            Assumes that elevations are sorted from old to young along the first axis. (Analogous to exhumation_rates)
         depth_integration : float
             Determines over which depth the accumulation of the target nuclide will be calculated.
             The actual total depth value will depend on the step size and exhumation rate, but the used
@@ -106,8 +106,8 @@ def calculate_transient_concentration(
     ### the benefit of using larger total depths outweights the inaccuracy in calculated radioactive decay.
     
     # Some shorthand notations
-    exh = exhumation_rates
-    z = surface_elevations
+    exh = np.flipud(exhumation_rates) # legacy: we have to reverse the first axis to accumulate concentrations...
+    z = np.flipud(surface_elevations) # legacy: we have to reverse the first axis to accumulate concentrations...
     prod = production_rate
     lambd = np.log(2) / halflife
     c0 = inheritance_concentration

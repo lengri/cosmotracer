@@ -22,7 +22,7 @@ dependencies = [
   'pyLSD@git+https://github.com/lengri/pyLSD',
   'shapely',
   'geopandas',
-  'ujson'
+  'h5py'
 ]
 
 [tool.setuptools]
