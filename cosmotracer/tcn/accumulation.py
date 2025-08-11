@@ -1,9 +1,14 @@
 import numpy as np
-import time 
-import os
-
+import os, logging, time
+logger = logging.getLogger(__name__)
 from cosmotracer.tcn import calculate_xyz_scaling_factors
 
+class IntegrationError(Exception):
+    """
+    Throw this error in case depth cannot be properly integrated
+    for transient concentrations.
+    """
+    pass
 
 def calculate_steady_state_erosion(
     concentration : np.ndarray | float,
@@ -35,8 +40,8 @@ def calculate_transient_concentration(
     halflife : float = np.inf,
     bulk_density : float = 2.7,
     attenuation_length : float = 160,
-    nuclide : int = 3,
-    # production_pathway : str = "sp", # TODO: Implement this!!!
+    nuclide : str = "He",
+    production_pathway : str = "sp",
     northings : np.ndarray | None = None,
     eastings : np.ndarray | None = None,
     epsg : int | None = None,
@@ -80,9 +85,12 @@ def calculate_transient_concentration(
             The average/bulk density of the overlying rock column. Default is 2.7.
         attenuation_length : float
             The attenuation length for the production pathway. Default is 160 g/cm^2.
-        nuclide : int
-            The mass number of the isotope. Needed to calculate the scaling factors according to Lifton et al. (2014).
-            Default is 3 (3He).
+        nuclide : str
+            The isotope name. Needed to calculate the scaling factors according to Lifton et al. (2014).
+            Default is "He" (3He).
+        production_pathway : str
+            Determines which lat, lon, z, scaling factors are used. Available pathways are sp, eth, th, totmu, nmu, pmu.
+            Note that the production_rate needs to be scaled to the relevant pathway separately!
         northing : np.ndarray
             Optional input for easting (in m). If None, defaults to 0.
         easting : np.ndarray
@@ -113,20 +121,21 @@ def calculate_transient_concentration(
     c0 = inheritance_concentration
     mu = bulk_density / attenuation_length
     
-    _z2iso = {
-        3 : "He",
-        10 : "Be",
-        26 : "Al",
-        14 : "C"
-    }
-    
     n, m = exh.shape
     
+    pathway2id = {
+        "sp": 0,
+        "eth": 1,
+        "th": 2,
+        "totmu": 3,
+        "nmu": 4,
+        "pmu": 5
+    }
     # Defaults for latitude, longitude
     if northings is None:
         northings = np.zeros(m)
     if eastings is None:
-        eastings = np.zeros(m)
+        eastings = np.ones(m)*500_000 # avoid bounds errors for utm
         
     # Defualts for inheritance
     if c0 is None:
@@ -146,21 +155,20 @@ def calculate_transient_concentration(
     where_integrated = np.where(min_dep_at_t>=depth_integration)[0]   
     shape_time_start = time.time()
     
-    #id_print = np.argmin(coldep[-1,:])
-    #print("coldep", coldep[:,id_print])
-    #print("exh per dt", exh_per_t[:,id_print])
-    #print("exh rate", exh[:,id_print])
-    #print("dt", dt)
-    #print("id", id_print)
-    
     # print("Ensuring depth integration")
     if len(where_integrated) == 0: 
-
+        logger.info("Depth integration not reached, adding slices until total depth > depth_integration")
         # we haven't reached the depth integration for at least one sample
         # keep adding new rows to our z, exh, exh_per_t, exh_tot, t arrays
         # until we've reached depth_integrated for all samples.
         if throw_integration_error:
-            raise Exception("Exhumation history does not allow integration over desired depth_integration")
+            logger.error(
+                f"Function interrupted because `throw_integration_error` is {throw_integration_error}:\n"
+                f"\tColumn depth for at least one sample is: {coldep[-1,:].min():.2f}\n"
+                f"\tColumn depth is smaller than required `depth_integration` {depth_integration:.2f}\n"
+            
+            )
+            raise IntegrationError("Exhumation history does not allow integration over desired depth_integration")
 
         reached_integration = False
         
@@ -172,7 +180,14 @@ def calculate_transient_concentration(
             
             if coldep[-1,:].min() >= depth_integration:
                 reached_integration = True
-        
+
+            logger.info(
+                "Added slice to exhumation history, dimensions are:\n"
+                f"\texh: {exh.shape}\n"
+                f"\texh_per_t: {exh_per_t.shape}\n"
+                f"\tcoldep: {coldep.shape}\n"
+                f"\tz: {z.shape}"
+            )
         # we know that we'll use all available rows to integrate the concentrations
         # since we've needed to add some.
         n, m = exh.shape 
@@ -187,11 +202,20 @@ def calculate_transient_concentration(
             coldep = coldep[:n_cut+1,:]
             z = z[:n_cut,:]
             
-            n, m = exh.shape    
+            n, m = exh.shape
+            
+        logger.info(
+            "Cut exhumation history to new dimensions:\n"
+            f"\texh: {exh.shape}\n"
+            f"\texh_per_t: {exh_per_t.shape}\n"
+            f"\tcoldep: {coldep.shape}\n"
+            f"\tz: {z.shape}"
+        )   
                        
     shape_time_end = time.time()
-    # Calculate the scaling factors here. A small optimisation is that existing pairs of
-    # are not calculated again.
+    
+    # Calculate the scaling factors here. We make use of cached values 
+    # if it is allowed.
     scaling_factors = np.zeros(z.shape)
     
     # print("Scaling factors")
@@ -205,11 +229,14 @@ def calculate_transient_concentration(
             y=northings,
             z=z[i,:],
             epsg=epsg,
-            nuclide=_z2iso[nuclide],
+            nuclide=nuclide,
             verbose=False,
             allow_cache=allow_cache
         )
-        scaling_factors[i,:] = out[:,0]
+        scaling_factors[i,:] = out[:,pathway2id[production_pathway]]
+        logger.debug(f"Calculated scaling factors for step {i} of {z.shape[0]}")
+    
+    logger.info("Successfully calculated scaling factors")
         
     # duplicate the modern entry for scaling factor so it matches the shape of coldepth
     scaling_factors = np.vstack([scaling_factors[0,:], scaling_factors])
@@ -239,13 +266,24 @@ def calculate_transient_concentration(
         production_in_dt = integral(dt) - integral(0)
         conc_out += production_in_dt
         conc_out -= dt*lambd*conc_out # decay fraction
+        
+        logger.debug(
+            f"Calculated concentrations for step {i}:\n"
+            f"\tProduction rates: P0={np.round(P0,2)}, P1={np.round(P1,2)}\n"
+            f"\tColumn depths: C0={np.round(C0,2)}, C1={np.round(C1,2)}\n"
+            f"\tProduction in step: {np.round(production_in_dt,2)}\n"
+            f"\tDecay fraction: {np.round(dt*lambd*conc_out,2)}\n"
+        )
+        
+    logger.info("Successfully integrated concentrations")
     integrate_time_end = time.time()
     
-    if False:
-        print("Cutting time:", shape_time_end-shape_time_start)
-        print("Scaling time:", scaling_time_end-scaling_time_start)
-        print("Integration time:", integrate_time_end-integrate_time_start)
-        print("Minmax concs:", conc_out.min(), conc_out.max())
+    logger.info(
+        f"Cutting time:, {shape_time_end-shape_time_start:.3f}\n"
+        f"Scaling time:, {scaling_time_end-scaling_time_start:.3f}\n"
+        f"Integration time:, {integrate_time_end-integrate_time_start:.3f}\n"
+        f"Minmax concs:, {conc_out.min():.2f}, {conc_out.max():.2f}"
+    )
     
     return conc_out, scaling_factors[0,:]*prod
         

@@ -13,12 +13,15 @@ from landlab.components import (
     StreamPowerEroder
 )
 from landlab import RasterModelGrid
+from landlab import NodeStatus
 
-import os, sys, platformdirs
-from pathlib import Path
-
+import logging
+logger = logging.getLogger(__name__)
 # For saving files
-from cosmotracer.utils.filing import ModelCache
+from cosmotracer.utils.filing import (
+    ModelCache,
+    get_cachedir
+)
 from cosmotracer.tcn import calculate_xyz_scaling_factors
 from cosmotracer.tcn.accumulation import (
     calculate_steady_state_concentration,
@@ -26,7 +29,9 @@ from cosmotracer.tcn.accumulation import (
 )
 
 # Cache dir and file name. Change only if you know what you're doing...
-    
+class ParseError(Exception):
+    pass
+
 class CosmoLEM(RasterModelGrid):
     
     """
@@ -51,11 +56,11 @@ class CosmoLEM(RasterModelGrid):
         m_sp : float = 0.5,
         shape : tuple = (100, 100),
         xy_spacing : float = 10.,
-        xy_of_lower_left : bool = (0., 0.),
+        xy_of_lower_left : bool = (500_000, 0.),
         allow_cache : bool = False,
         fail_on_overwrite : bool = True,
         identifier : int | str = 0,
-        epsg : int | None = None
+        epsg : int | None = 32611
     ) -> None:
         
         """
@@ -108,7 +113,7 @@ class CosmoLEM(RasterModelGrid):
 
         # Dict for step run info
         self.step_info = {
-            "T_total": 0.,
+            'T_total': 0.,
             "dt": None,
             "U": None,
             "K_sp": None
@@ -151,13 +156,17 @@ class CosmoLEM(RasterModelGrid):
         self.add_zeros("tcn__scaling_totmu")
         self.add_zeros("tcn__scaling_nmu")
         self.add_zeros("tcn__scaling_pmu")
-        self.add_zeros("tcn__concentration")
         
         # Topo shielding
         self.add_ones("tcn__topographic_shielding")
         
         # Concentrations
-        self.add_zeros("tcn__nuclide_concentration")
+        self.add_zeros("tcn__nuclide_concentration_sp")
+        self.add_zeros("tcn__nuclide_concentration_eth")
+        self.add_zeros("tcn__nuclide_concentration_th")
+        self.add_zeros("tcn__nuclide_concentration_totmu")
+        self.add_zeros("tcn__nuclide_concentration_nmu")
+        self.add_zeros("tcn__nuclide_concentration_pmu")
         
         # The exhumation rates
         self.add_zeros("exhumation_rate")
@@ -167,6 +176,69 @@ class CosmoLEM(RasterModelGrid):
         self.tracked_exhumation = None
         self.tracked_z = None
         self.tracked_transient_concentrations = None
+        
+        logger.info(
+            f"Successfully initialised CosmoLEM instance"
+        )
+    
+    def set_outlet_position(
+        self,
+        location : str = "W"
+    ):
+        """
+        Set the single open outlet node for the model.
+        This can be one of the 4 cardinal directions, or
+        NW/NE/SE/SW.
+        """    
+        
+        n, m = self.shape
+        # walk through all possible cases
+        # NOTE: Remember that the origin is being treated as "lower left",
+        # not upper left, as is normally the case when plotting with
+        # matplotlib.
+        match location:
+            case "S":
+                rc_id = (0, int(m/2))
+            case "SE":
+                rc_id = (0, m-1)
+            case "E":
+                rc_id = (int(n/2),m-1)
+            case "NE":
+                rc_id = (n-1, m-1)
+            case "N":
+                rc_id = (n-1, int(m/2))
+            case "NW":
+                rc_id = (n-1, 0)
+            case "W":
+                rc_id = (int(n/2), 0)
+            case "SW":
+                rc_id = (0, 0)
+            case _:
+                raise ParseError(f"Could not parse location argument {location}")
+        
+        # convert index to linear index
+        outlet_id = np.ravel_multi_index(rc_id, self.shape)
+        
+        # set all boundary nodes to closed...
+        lin_id_S = np.array([
+            np.ravel_multi_index((0,j), self.shape) for j in range(0,m)
+        ])
+        lin_id_E = np.array([
+            np.ravel_multi_index((i,m-1), self.shape) for i in range(0,n)
+        ])
+        lin_id_N = np.array([
+            np.ravel_multi_index((n-1,j), self.shape) for j in range(0,m)
+        ])
+        lin_id_W = np.array([
+            np.ravel_multi_index((i,0), self.shape) for i in range(0,n)
+        ])
+        
+        self.status_at_node[lin_id_N] = NodeStatus.CLOSED
+        self.status_at_node[lin_id_E] = NodeStatus.CLOSED
+        self.status_at_node[lin_id_S] = NodeStatus.CLOSED
+        self.status_at_node[lin_id_W] = NodeStatus.CLOSED
+        
+        self.status_at_node[outlet_id]= NodeStatus.FIXED_VALUE
         
     def run_one_step(
         self,
@@ -178,7 +250,7 @@ class CosmoLEM(RasterModelGrid):
         """
         Advances the LEM by one step. Information about this step is stored in a small dict,
         self.step_info. This dict stores the time step size ("dt"), the imposed uplift rate ("U"),
-        the total elapsed model run time ("T_total"), and the imposed erodibility ("K_sp"). 
+        the total elapsed model run time ('T_total'), and the imposed erodibility ("K_sp"). 
         The resulting exhumation rate calculated during the time step is stored in 
         self.at_node["exhumation_rate"].
         
@@ -195,7 +267,7 @@ class CosmoLEM(RasterModelGrid):
         
         self.step_info["dt"] = dt
         self.step_info["U"] = U 
-        self.step_info["T_total"] += dt
+        self.step_info['T_total'] += dt
         self.step_info["K_sp"] = K_sp
 
         # We have to create a new SPL in case
@@ -205,13 +277,22 @@ class CosmoLEM(RasterModelGrid):
         )
 
         z_old = self._z.copy()
-        
         self._z[self.core_nodes] += U*dt
-        self.fa.run_one_step()
-        self.spl.run_one_step(dt=dt)
+        self.fa.run_one_step() # update flow routing
+        self.spl.run_one_step(dt=dt) # erode landscape
         
         exhum = (U*dt - (self._z - z_old)) / dt 
         self.at_node["exhumation_rate"] = exhum
+        
+        logger.info(
+            f"Evolved landscape for one step:\n"
+            f"\t{dt=}\n"
+            f"\t{U=}\n"
+            f"\t{K_sp=}\n"
+            f"\tn_sp={self.n_sp}\n"
+            f"\tm_sp={self.m_sp}\n"
+            f"\tT_total={self.step_info['T_total']}"
+        )
         
     def save_grid(
         self, 
@@ -222,6 +303,10 @@ class CosmoLEM(RasterModelGrid):
         Save the current state of the grid/field to a file. If filepath is None,
         the grid will be saved to the Cache directory. Note that the file is only saved
         if allow_cache is set to True.
+        
+        In case of saving to cache, the file name will be self-recording, i.e. it will contain
+        the grid dimension, K, U, n, m, and the total runtime. See `self.cachekey` for the full
+        file name.
         
         Parameters:
         -----------
@@ -237,11 +322,16 @@ class CosmoLEM(RasterModelGrid):
             np.savetxt(
                 filepath, self.at_node[field_name]
             )
+            logger.info(f"Saved field {field_name} to {filepath} at runtime {self.step_info['T_total']}")
         
         self._update_cachekey()
+        
         self._cache.save_file(
             filekey=self.cachekey,
             array=self.at_node[field_name]
+        )
+        logger.info(
+            f"Saved cache file {self.cachekey} in {get_cachedir()} at runtime {self.step_info['T_total']}"
         )
     
     def load_grid(
@@ -257,6 +347,8 @@ class CosmoLEM(RasterModelGrid):
         Load and add a field to the instance from a file or the Cache. If T_total, U, K_sp, and dt
         are left as their default values, this function will look into the self.step_info dict
         to set these values.
+        
+        To check existing files in the cache, use `cosmotracer.utils.get_cachedir()`.
         
         Parameters:
         -----------
@@ -282,6 +374,7 @@ class CosmoLEM(RasterModelGrid):
             self._z = np.loadtxt(
                 filepath
             )
+            logger.info(f"Loaded file from {filepath}")
         # If not: Lookup cache for existing entries
         else:
             self._update_cachekey(
@@ -290,12 +383,18 @@ class CosmoLEM(RasterModelGrid):
                 K_step=K_sp,
                 dt_step=dt
             )
+            logger.info(f"Updated cachekey to {self.cachekey}")
             self._z = self._cache.load_file(
                 filekey=self.cachekey
             )
+            logger.info("Attempted to load file from cache")
         
         # If we haven't assigned any array to self._z, something has gone wrong.
         if self._z is None:
+            logger.error(
+                f"No data for {field_name} could be loaded\n"
+                f"If data was loaded from cache, no file with name {self.cachekey} was found."
+            )
             raise Exception("Could not load any model; self._z is None")
         
         self.at_node[field_name] = self._z
@@ -307,11 +406,18 @@ class CosmoLEM(RasterModelGrid):
                 flow_director="FlowDirectorD8",
                 depression_finder="DepressionFinderAndRouter"
             )
-            self.fa.run_one_step()        
+            self.fa.run_one_step()
+            logger.info(
+                "Ran FlowAccumulator for one step with FlowDirectorD8 and DepressionFinderAndRouter"
+            )
+        else:
+            logger.info("Did not run FlowAccumulator because field_name != 'topographic__elevation'")
+                    
     
     def _init_grid(
         self,
-        field_name : str = "topographic__elevation"
+        field_name : str = "topographic__elevation",
+        seed : int | None = None
     ):
         """
         Initiate the a new grid, either by loading from Cache or by creating a new random initial topography.
@@ -327,34 +433,26 @@ class CosmoLEM(RasterModelGrid):
             # If we can't find a cached version,
             # create a new grid here. However, we throw an error if T_total is not zero.
             
-            if self.step_info["T_total"] > 0.:
+            if self.step_info['T_total'] > 0.:
                 raise Exception("Could not initialise grid: T_total > 0 and no cached run found")
-        
-            ns_grad=0.5
-            ew_grad=0.1
-            noise_mag=500
-            # np.random.seed(1)
 
-            shape = self.shape
-
-            if self._z is None:
-                z = np.zeros(shape)
-                for i in range(1, shape[1]-1):
-                    z[1:-1,i] += np.abs(ns_grad*np.linspace(-self.dx*shape[0]/2,self.dx*shape[0]/2,shape[0]-2))+ew_grad*i*self.dx
-
-                noise = np.random.random((shape[0]-2, shape[1]-2))*noise_mag # crank up the noise            
-                z[1:-1,1:-1] += noise
-
-                z = z.flatten()
+            if seed is not None:
+                np.random.seed(seed)
                 
-            # save elevations
-            self._z = z 
-        
+            init_values = np.zeros(self.number_of_nodes)
+            init_values[self.core_nodes] = np.random.uniform(0, 1, size=len(self.core_nodes))
+            # save field values
+            self._z = init_values
+            
+            logger.info(f"Constructed noisy initial topography {field_name}")      
+             
         # self.set_closed_boundaries_at_grid_edges(True,True,False,True)
         self.add_zeros(
-            field_name, at="node", units="m"
+            field_name, at="node"
         )
-        self.at_node[field_name] = self._z        
+        self.at_node[field_name] = self._z 
+        
+        logger.info(f"Set field values for field {field_name}")
 
     def _update_cachekey(
         self, 
@@ -381,7 +479,7 @@ class CosmoLEM(RasterModelGrid):
         """
         
         # Use info in step_info or the directly supplied values
-        t_use = T_total if T_total is not None else self.step_info["T_total"]
+        t_use = T_total if T_total is not None else self.step_info['T_total']
         u_use = U_step if U_step is not None else self.step_info["U"]
         k_use = K_step if K_step is not None else self.step_info["K_sp"]
         dt_use = dt_step if dt_step is not None else self.step_info["dt"]        
@@ -397,6 +495,8 @@ class CosmoLEM(RasterModelGrid):
             f"key{self.identifier}"
         ]
         self.cachekey = "_".join(cache_components) + ".h5"  
+        
+        logger.info(f"Updated cachekey to {self.cachekey} at runtime {self.step_info['T_total']}")
     
     def calculate_TCN_topo_scaling(
         self
@@ -410,13 +510,13 @@ class CosmoLEM(RasterModelGrid):
     
     def calculate_TCN_xyz_scaling(
         self, 
-        nuclide : str, 
+        nuclide : str = "He", 
         opt_args : dict = {}
     ):
         """
         Calculate elevation, latitude, and longitude scaling factors. 
         The resulting factors are stored in new at_node fields named
-        "tcn__scaling_{pathway}", where pathway is "sp" for spallogenic,
+        `tcn__scaling_{pathway}`, where pathway is "sp" for spallogenic,
         "eth" for epi-thermal, "th" for thermal, "totmu" for total muon,
         "nmu" for negative muon, and "pmu" for positive muon production
         pathways.
@@ -427,7 +527,7 @@ class CosmoLEM(RasterModelGrid):
                 The epsg code for the coordinate system. Used to interpret the
                 self.x_of_node, self.y_of_node values.
             nuclide : str
-                The TCN of interest. Must be "He", "Be", "C", or "Al".
+                The TCN of interest. Must be "He", "Be", "C", or "Al". Default is "He".
             opt_args : dict
                 Dict of optional arguments passed on to 
                 cosmotracer.calculate_xyz_scaling_factors().
@@ -447,13 +547,16 @@ class CosmoLEM(RasterModelGrid):
         self.at_node["tcn__scaling_totmu"][self.core_nodes] = scaling[:,3]
         self.at_node["tcn__scaling_nmu"][self.core_nodes] = scaling[:,4]
         self.at_node["tcn__scaling_pmu"][self.core_nodes] = scaling[:,5]
+        
+        logger.info(f"Calculated scaling factors at runtime {self.step_info['T_total']}")
     
     def calculate_TCN_steady_state_concentration(
         self,
         bulk_density : float = 2.7,
         production_rate_SLHL : float = 1.,
         attenuation_length : float = 160.,
-        halflife : float = np.inf
+        halflife : float = np.inf,
+        production_pathway : str = "sp"
     ):
         """
         Calculates the expected TCN concentration at each cell assuming steady-state
@@ -472,6 +575,12 @@ class CosmoLEM(RasterModelGrid):
                 The attenuation length for the production pathway (g/cm^2). Default is 160 g/cm^2
             halflife : float
                 The TCN half life time (yr). Default assumes a stable nuclide (np.inf).
+            production_pathway : str
+                The production pathway corresponding to either "sp" for spallogenic,
+                "eth" for epi-thermal, "th" for thermal, "totmu" for total muon,
+                "nmu" for negative muon, and "pmu" for positive muon production
+                pathways. The results are always saved to the field
+                "tcn__{production_pathway}_nuclide_concentration"
                 
         """
         
@@ -485,17 +594,19 @@ class CosmoLEM(RasterModelGrid):
         # in the future, it should be a sum over the individual production histories 
         # (sp, mu, eth, th).
         
-        xyz_scaling = self.at_node["tcn__scaling_sp"][self.core_nodes]
+        xyz_scaling = self.at_node[f"tcn__scaling_{production_pathway}"][self.core_nodes]
         topo_shielding = self.at_node["tcn__topographic_shielding"][self.core_nodes]
         prod = xyz_scaling*topo_shielding*production_rate_SLHL
         
-        self.at_node["tcn__nuclide_concentration"][self.core_nodes] = calculate_steady_state_concentration(
+        self.at_node[f"tcn__nuclide_concentration_{production_pathway}"][self.core_nodes] = calculate_steady_state_concentration(
             erosion_rate = self.at_node["exhumation_rate"][self.core_nodes],
             bulk_density=bulk_density,
             production_rate=prod,
             attenuation_length=attenuation_length,
             halflife=halflife
         )
+        
+        logger.info(f"Calculated {production_pathway} nuclide productions at runtime {self.step_info['T_total']}")
 
     def _track_exhumation_z(self):
         
@@ -512,7 +623,7 @@ class CosmoLEM(RasterModelGrid):
             raise Exception("self.tracked_nodes must be a 1d array of ids.")
         
         # check if the arrays already exist. If not, create them now.
-        if self.tracked_exhumation is None and self.tracked_z is None:
+        if self.tracked_exhumation is None or self.tracked_z is None:
             self.tracked_exhumation = self.at_node["exhumation_rate"][self.tracked_nodes].reshape(1,len(self.tracked_nodes))
             self.tracked_z = self.at_node["topographic__elevation"][self.tracked_nodes].reshape(1,len(self.tracked_nodes))
     
@@ -535,7 +646,6 @@ class CosmoLEM(RasterModelGrid):
                 )
             )
             
-            
     def calculate_TCN_transient_concentration(
         self,
         bulk_density : float = 2.7,
@@ -543,15 +653,49 @@ class CosmoLEM(RasterModelGrid):
         attenuation_length : float = 160.,
         halflife : float = np.inf,
         depth_integration : float = 1.,
-        nuclide : int = 3
+        nuclide : str = "He"
     ):
         """
-        Calculate transient concentrations as the model is running.
+        Calculates the transient nuclide concentrations for model-tracked nodes 
+        during the simulation.
+
+        This method computes the nuclide concentrations for nodes that have been
+        registered using `self.track_nodes()`. At each simulation time step, it 
+        calculates exhumation and elevation histories for the tracked nodes and 
+        computes the corresponding transient nuclide concentrations using 
+        `cosmotracer.tcn.calculate_transient_concentration()`.
+        
+        Coordinates (eastings, northings) and EPSG code are pulled from the model 
+        state (`self.x_of_node`, `self.y_of_node`, `self.epsg`).
+
+        Parameters:
+        -----------
+            bulk_density : float
+                The average density of the overlying rock column in g/cm^3.
+                Default is 2.7.
+            production_rate_SLHL : float
+                The sea-level high-latitude (SLHL) surface production rate in at/g/yr.
+                Default is 1.
+            attenuation_length : float
+                The attenuation length in g/cm^2. Default is 160.
+            halflife : float
+                The half-life of the nuclide in years. Use np.inf for stable isotopes.
+                Default is np.inf.
+            depth_integration : float
+                Target integration depth (in meters) over which nuclide accumulation 
+                will be calculated. Determines how much of the exhumation history is 
+                used in the calculation. Default is 1.
+            nuclide : str
+                The isotope for which the concentration is being calculated.
+                Default is "He" (³He). Different isotopes have different scaling factors.
         """
         # we create/stack arrays with surface elevations and 
         # erosion rate sof  the points of interest.
         self._track_exhumation_z()
         
+        logger.info(
+            f"Tracked node exhumation and elevation for tracked nodes at runtime {self.step_info['T_total']}"
+        )
         # with this data, we can calculate transient concentrations for the current time-step.
         tracked_concs, _ = calculate_transient_concentration(
             exhumation_rates=self.tracked_exhumation,
@@ -568,9 +712,14 @@ class CosmoLEM(RasterModelGrid):
             epsg=self.epsg,
             allow_cache=True
         )
+        logger.info(
+            f"Calculated transient concentrations at runtime {self.step_info['T_total']}"
+        )
         
+        # Create a new tracked_transient_concentrations stack, if this is the first step
         if self.tracked_transient_concentrations is None:
             self.tracked_transient_concentrations = tracked_concs.reshape(1,len(self.tracked_nodes))
+        # Or add it to the existing stack
         else:
             self.tracked_transient_concentrations = np.vstack(
                 (
@@ -628,44 +777,11 @@ class CosmoLEM(RasterModelGrid):
             replace=False,
             size=n,
             p=weights
-        )       
+        )
         
-
-class GradientFactory():
-    def __init__(self, shape):
-        self.shape = shape
-        
-    def create_uniform(
-        self,
-        value
-    ):
-        return np.full(self.shape, value)
-
-    def create_linear(
-        self,
-        value_pair,
-    ):
-        
-        y0 = value_pair[0]
-        y1 = value_pair[1]
-        
-        m = self.shape[1]
-        e = (y1-y0)/(m-1)*np.arange(0,m,1)+y0
-        
-        return np.full(self.shape, e)
-
-    def create_step(
-        self,
-        value_pair
-    ):
-        y0 = value_pair[0]
-        y1 = value_pair[1]
-        
-        e = np.ones(self.shape)
-        e[:,:int(self.shape[1]/2)] = y0
-        e[:,int(self.shape[1]/2):] = y1 
-        
-        return e
+        logger.info(
+            f"Started tracking nodes, {n=}"
+        )
     
 def _is_numeric(value):
     if type(value) == np.ndarray: return False 

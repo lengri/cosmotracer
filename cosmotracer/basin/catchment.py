@@ -4,22 +4,29 @@ package. It makes heavy use of landlab's RasterModelGrid,
 but has many additional capabilities.
 """
 
-from cosmotracer.utils.filing import export_field_to_ascii
-from cosmotracer.utils.landlab_convenience import (
-    cut_DEM_to_watershed,
-    find_watershed
+from cosmotracer.synthetic.synthetic import CosmoLEM
+from cosmotracer.utils.filing import (
+    export_field_to_ascii,
+    export_array_to_gpkg,
+    export_watershed_to_gpkg
+)
+from cosmotracer.utils.wrappers import (
+    cut_grid_to_watershed,
+    select_watershed
     
 )
 from landlab.io import esri_ascii
-from landlab import RasterModelGrid
-import os
+from landlab import RasterModelGrid, NodeStatus
 from landlab.components import (
     FlowAccumulator,
     LakeMapperBarnes
 )
 import numpy as np
 
-from cosmotracer.synthetic.synthetic import CosmoLEM
+
+import os, logging
+logger = logging.getLogger(__name__)
+
 
 class Basin(CosmoLEM):
     
@@ -28,7 +35,7 @@ class Basin(CosmoLEM):
         filepath : str,
         epsg : int,
         is_catchment_dem : bool = False,
-        nodata=-999999.
+        nodata : float = -999999.
     ):
         
         self.epsg = epsg
@@ -41,24 +48,26 @@ class Basin(CosmoLEM):
         # initialising the RasterModelGrid.
         
         with open(filepath) as fp:
-            mg = esri_ascii.load(
+            grid = esri_ascii.load(
                 stream=fp, 
                 name="topographic__elevation"
             )
-            z = mg.at_node["topographic__elevation"]
-        
+            z = grid.at_node["topographic__elevation"]
+            logger.info(f"Loaded DEM from {filepath}")
+            
         if not is_catchment_dem:
             
             # we need to calculate flow routing here
             fa = FlowAccumulator(
-                mg,
+                grid,
                 flow_director="FlowDirectorD8"
             )
             fa.run_one_step()
+            logger.info("Ran simple FlowAccumulator (no Depression routing)")
             
             # and since this is a raw DEM, we need to fill depressions
             lmb = LakeMapperBarnes(
-                mg,
+                grid,
                 method="D8",
                 fill_flat=False,
                 track_lakes=True,
@@ -66,38 +75,50 @@ class Basin(CosmoLEM):
                 reaccumulate_flow=True,
                 ignore_overfill=True
             )
+            logger.debug(
+                "Created LakeMapperBarnes with method='D8', fill_flat=False,"
+                "track_lakes=True, redirect_flow_steepest_descent=True,"
+                "reaccumulate_flow=True, ignore_overfill=True"
+            )
             lmb.run_one_step()
+            logger.info("Successfully run LakeMapperBarnes")
             
             # now, let the user pick a watershed outlet and cut the 
             # DEM to that watershed.
-            mask = find_watershed(mg)
+            logger.info("Asking user to select watershed")
+            mask = select_watershed(grid)
+            logger.info("User selected watershed")
             
             # set all elevation values outside the watershed mask to nodata
             z[mask==0] = nodata
             
-            mg, z = cut_DEM_to_watershed(mg, mask) # this creates a new mg without fa!
+            grid = cut_grid_to_watershed(grid, mask) # this creates a new grid without fa!
+            
+            logger.info("Successfully cut grid to watershed")
             
         # If the dem is already a processed catchment dem, we don't need to do anything except
         # calculate the flow routing.
-        mg.set_nodata_nodes_to_closed(
-            z, 
+        grid.set_nodata_nodes_to_closed(
+            grid.at_node["topographic__elevation"], 
             nodata
         )
                 
         # Initialise the RasterModelGrid itself
-        lin_ind = np.ravel_multi_index((mg.shape[0]-1, 0), mg.shape)
+        lin_ind = np.ravel_multi_index((grid.shape[0]-1, 0), grid.shape)
         super().__init__(
-            z_init=z,
-            shape=mg.shape, 
-            xy_spacing=(mg.dx, mg.dy), 
+            z_init=grid.at_node["topographic__elevation"],
+            shape=grid.shape, 
+            xy_spacing=(grid.dx, grid.dy), 
             xy_of_lower_left=(
-                mg.x_of_node[lin_ind],
-                mg.y_of_node[lin_ind]
-            )
+                grid.x_of_node[lin_ind],
+                grid.y_of_node[lin_ind]
+            ),
+            epsg=epsg
         )   
+        logger.debug("Initialised cosmotracer.CosmoLEM instance")
         #self.add_zeros("topographic__elevation", at="node")
         #self.at_node["topographic__elevation"] = z[:]
-        self.set_nodata_nodes_to_closed(z, nodata)
+        self.set_nodata_nodes_to_closed(grid.at_node["topographic__elevation"], nodata)
         
         # run the flow accumulator (again) like usual
         fa = FlowAccumulator(
@@ -106,6 +127,7 @@ class Basin(CosmoLEM):
             depression_finder="DepressionFinderAndRouter"
         )
         fa.run_one_step()
+        logger.info("Ran proper FlowAccumulator with DepressionFinderAndRouter")
         
         self.FlowAccumulator = fa
     
@@ -123,5 +145,24 @@ class Basin(CosmoLEM):
     
     def parse_tcn_constants(
         tcn_dict
+    ):
+        pass
+    
+    def save_watershed_gpkg(
+        self,
+        filepath
+    ):
+        mask = (self.status_at_node == NodeStatus.CORE).reshape(self.shape).astype(int)
+        export_watershed_to_gpkg(
+            mask=mask, 
+            xy_ll_corner=self.xy_of_lower_left, 
+            cellsize=self.dx, 
+            filepath=filepath,
+            epsg=self.epsg
+        )
+        
+    def save_grid_asc(
+        self,
+        field_name
     ):
         pass

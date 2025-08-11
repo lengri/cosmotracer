@@ -1,7 +1,7 @@
 import numpy as np
 import os 
 import geopandas as gpd
-from shapely import Point
+from shapely import Point, box
 
 # For caching stuff
 import h5py, platformdirs
@@ -9,47 +9,93 @@ from pathlib import Path
 from datetime import datetime, timezone
 import ujson
 
-def export_field_to_gpgk(
-    mg,
-    node_field_name : str,
+# For the watershed export
+from affine import Affine
+from scipy import ndimage
+
+def get_cachedir():
+    """
+    Returns the directory of the cache for cosmotracer.
+    """
+    
+    return platformdirs.user_cache_dir()
+
+def export_watershed_to_gpkg(
+    mask,
+    xy_ll_corner,
+    cellsize,
+    filepath,
+    epsg
+):
+    
+    mask = np.flipud(mask)
+
+    # Label connected components (watersheds) in the mask
+    labeled, num_features = ndimage.label(mask)
+
+    transform = Affine.translation(xy_ll_corner[0], xy_ll_corner[1]) * Affine.scale(cellsize, -cellsize)
+    
+    polygons = []
+
+    for region_id in range(1, num_features + 1):
+        region = labeled == region_id
+        rows, cols = np.where(region)
+
+        for r, c in zip(rows, cols):
+            # Get real-world coordinates of the pixel center
+            x, y = transform * (c, r)
+            x -= cellsize/2 # shift from lower left to cell center
+            y += cellsize/2 # shift from lower left to cell center
+            # Build pixel-sized polygon (square around pixel)
+            pixel_poly = box(x, y - cellsize, x + cellsize, y)
+            polygons.append(pixel_poly)
+
+    # Merge all into one polygon (if desired)
+    crs = f"EPSG:{epsg}"
+
+    gdf = gpd.GeoDataFrame(geometry=polygons, crs=crs)
+    gdf = gdf.dissolve()
+
+    # Export
+    gdf.to_file(filepath, driver="GPKG")
+    
+def export_array_to_gpkg(
+    x : np.ndarray,
+    y : np.ndarray,
+    data : dict,
     epsg : int,
     filepath : str,
-    empty_value = 0.,
-    
+    layer : str = "points"
 ):
     """
     Takes all x, y, field data of nodes that are != empty_value
     and constructs a GeoPackage of points with attached values
     """
     
-    ids = np.where(mg.at_node[node_field_name] != empty_value)
-    
-    x = mg.x_of_node[ids]
-    y = mg.y_of_node[ids]
-    z = mg.at_node[node_field_name][ids]
-    
     points = [Point(xx, yy) for xx, yy in zip(x, y)]
     gdf = gpd.GeoDataFrame(geometry=points, crs=f"EPSG:{epsg}")
-    gdf[node_field_name] = z
     
-    gdf.to_file(filepath, layer=node_field_name, driver="GPKG")
+    for k in data.keys():
+        gdf[k] = data[k]
+    
+    gdf.to_file(filepath, layer=layer, driver="GPKG")
     
 def export_field_to_ascii(
-    mg,
+    grid,
     node_field_name,
     filepath
 ):
     
-    out = mg.at_node[node_field_name].reshape(mg.shape)
-    x_ll, y_ll = mg.xy_of_lower_left
+    out = grid.at_node[node_field_name].reshape(grid.shape)
+    x_ll, y_ll = grid.xy_of_lower_left
     
     header = {
         "ncols": out.shape[1],
         "nrows": out.shape[0],
         "xllcorner": x_ll,
         "yllcorner": y_ll,
-        "cellsize": mg.dx,
-        "nodata_value": -999999.
+        "cellsize": grid.dx,
+        "nodata_value": grid.nodata
     }
     header_lines = [f"{key} {str(val)}" for key, val in list(header.items())]
     np.savetxt(
