@@ -20,6 +20,26 @@ def get_cachedir():
     
     return platformdirs.user_cache_dir()
 
+def export_points_to_gpkg(
+    x : np.ndarray, 
+    y : np.ndarray, 
+    z : np.ndarray, 
+    filepath : str, 
+    epsg : int
+):
+    """
+    Export points with coordinates (x, y, z) to a GeoPackage file.
+
+    Parameters:
+    - x, y, z: list/array of coordinates
+    - epsg: EPSG code for CRS (default 4326)
+    - filepath: output file path for .gpkg
+    """
+    geometry = [Point(x[i], y[i], z[i]) for i in range(len(x))]
+
+    gdf = gpd.GeoDataFrame(geometry=geometry, crs=f"EPSG:{epsg}")
+    gdf.to_file(filepath, driver="GPKG")
+    
 def export_watershed_to_gpkg(
     mask,
     xy_ll_corner,
@@ -79,28 +99,6 @@ def export_array_to_gpkg(
         gdf[k] = data[k]
     
     gdf.to_file(filepath, layer=layer, driver="GPKG")
-    
-def export_field_to_ascii(
-    grid,
-    node_field_name,
-    filepath
-):
-    
-    out = grid.at_node[node_field_name].reshape(grid.shape)
-    x_ll, y_ll = grid.xy_of_lower_left
-    
-    header = {
-        "ncols": out.shape[1],
-        "nrows": out.shape[0],
-        "xllcorner": x_ll,
-        "yllcorner": y_ll,
-        "cellsize": grid.dx,
-        "nodata_value": grid.nodata
-    }
-    header_lines = [f"{key} {str(val)}" for key, val in list(header.items())]
-    np.savetxt(
-        filepath, np.flipud(out), header=os.linesep.join(header_lines), comments=""
-    )
 
 PACKAGE_NAME = "cosmotracer"
       

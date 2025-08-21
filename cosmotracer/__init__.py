@@ -5,7 +5,7 @@ from . import grainmove
 from . import statistics 
 from . import synthetic
 from . import tcn 
-from . import topoanalysis 
+from . import topo 
 from . import utils 
 
 # Make some central classes and functions available

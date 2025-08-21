@@ -10,17 +10,22 @@ import scipy as sp
 
 from landlab.components import (
     FlowAccumulator,
-    StreamPowerEroder
+    StreamPowerEroder,
+    SteepnessFinder,
+    ChannelProfiler
 )
 from landlab import RasterModelGrid
 from landlab import NodeStatus
+from landlab.io import esri_ascii
 
 import logging
 logger = logging.getLogger(__name__)
+
 # For saving files
 from cosmotracer.utils.filing import (
     ModelCache,
     get_cachedir
+    
 )
 from cosmotracer.tcn import calculate_xyz_scaling_factors
 from cosmotracer.tcn.accumulation import (
@@ -184,7 +189,7 @@ class CosmoLEM(RasterModelGrid):
     def set_outlet_position(
         self,
         location : str = "W"
-    ):
+    ) -> int:
         """
         Set the single open outlet node for the model.
         This can be one of the 4 cardinal directions, or
@@ -240,11 +245,14 @@ class CosmoLEM(RasterModelGrid):
         
         self.status_at_node[outlet_id]= NodeStatus.FIXED_VALUE
         
-    def run_one_step(
+        return outlet_id
+    
+    def run_one_spl_step(
         self,
         U : float,
         K_sp : float,
-        dt : float
+        dt : float,
+        K_diffusion : float = 0.
     ) -> None:
         
         """
@@ -262,6 +270,8 @@ class CosmoLEM(RasterModelGrid):
                 The imposed erodibility (units depend on m, n).
             dt : float
                 The time step size (yr).
+            K_diffusion : float
+                If >0, a nonlinear diffusion term is applied to each cell in the model.
         
         """
         
@@ -312,16 +322,18 @@ class CosmoLEM(RasterModelGrid):
         -----------
             filepath : str
                 If not None, the field defined by field_name
-                will be saved to a .txt file using np.savetxt.
+                will be saved to a .asc file using esri_ascii.dump.
             field_name : str
                 Determines which field to save to file. Default is "topographic__elevation".
                 
         """
         
         if filepath is not None:
-            np.savetxt(
-                filepath, self.at_node[field_name]
-            )
+            # use landlabs native asc saving function
+            with open(filepath, "w") as f:
+                esri_ascii.dump(
+                    self, stream=f, name=field_name, at="node"
+                )
             logger.info(f"Saved field {field_name} to {filepath} at runtime {self.step_info['T_total']}")
         
         self._update_cachekey()
@@ -371,10 +383,10 @@ class CosmoLEM(RasterModelGrid):
         
         # If user wants to load grid from txt file, do it here
         if filepath is not None:
-            self._z = np.loadtxt(
-                filepath
-            )
+            with open(filepath) as f:
+                esri_ascii.load(f, at="node", name=field_name, out=self)
             logger.info(f"Loaded file from {filepath}")
+            
         # If not: Lookup cache for existing entries
         else:
             self._update_cachekey(
@@ -782,6 +794,67 @@ class CosmoLEM(RasterModelGrid):
         logger.info(
             f"Started tracking nodes, {n=}"
         )
+        
+    def calculate_ksn(
+        self,
+        min_drainage_area=1e6,
+        method : str = "slope-area", # alternative: chi-segment
+        reference_concavity : float = 0.5,
+        cp_data_structure : dict = {},
+        segment_break_ids : list = []
+    ):
+        """
+        possible methods: "slope-area", "chi-segment", "delta-chi"
+        """
+        
+        if method == "slope-area":
+            sf = SteepnessFinder(
+                self,
+                reference_concavity=reference_concavity,
+                min_drainage_area=min_drainage_area
+            )
+            sf.calculate_steepnesses()
+            return None # end here
+
+        # Get the channel nodes
+        self.add_field("channel__steepness_index", clobber=True)
+        if cp_data_structure == {}:
+            cp = ChannelProfiler(
+                self, 
+                main_channel_only=False, 
+                minimum_channel_threshold=min_drainage_area
+            )
+            cp.run_one_step()
+            cp_data_structure = cp.data_structure
+        
+        # Use centered finite difference if method is chi-segment
+        
+        if method == "delta-chi":
+            
+            # loop over every array
+            for outlet in cp_data_structure.keys():
+                for segment in cp_data_structure[outlet].keys():
+                    
+                    ids = cp_data_structure[outlet][segment]["ids"]
+                    
+                    if len(ids) > 2:
+                        zs = self.at_node["topographic__elevation"][ids]
+                        chis = self.at_node["channel__chi_index"][ids]
+                        
+                        chi_slopes = np.zeros_like(ids, dtype=float)
+                        chi_slopes[1:-1] = (zs[2:]-zs[:-2]) / (chis[2:]-chis[:-2])
+                        chi_slopes[0] = chi_slopes[1] 
+                        chi_slopes[-1] = chi_slopes[-2] 
+                        
+                        self.at_node["channel__steepness_index"][ids]= chi_slopes
+                    
+        elif method == "chi-segment":
+            
+            pass
+            
+        else:
+            raise Exception("method keyword not valid!")
+        pass 
     
 def _is_numeric(value):
     if type(value) == np.ndarray: return False 

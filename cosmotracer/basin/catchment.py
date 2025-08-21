@@ -6,7 +6,6 @@ but has many additional capabilities.
 
 from cosmotracer.synthetic.synthetic import CosmoLEM
 from cosmotracer.utils.filing import (
-    export_field_to_ascii,
     export_array_to_gpkg,
     export_watershed_to_gpkg
 )
@@ -43,9 +42,9 @@ class Basin(CosmoLEM):
         self.nodata = nodata
 
         # load the input ascii file. If it is a catchment_dem,
-        # we can feed it directly into the ModelGrid. If it isn't,
+        # we can feed it directly into the super CosmoLEM. If it isn't,
         # we let the user select the outlet and cut it now before 
-        # initialising the RasterModelGrid.
+        # initialising the super CosmoLEM.
         
         with open(filepath) as fp:
             grid = esri_ascii.load(
@@ -131,13 +130,6 @@ class Basin(CosmoLEM):
         
         self.FlowAccumulator = fa
     
-    def calculate_catchment_ksn(
-        min_channel_threshold=1e6,
-        method : str = "slope-area",
-        mn_ratio : float = 0.5,
-    ):
-        pass 
-    
     def parse_sample_concentrations(
         sample_dict
     ):
@@ -160,9 +152,55 @@ class Basin(CosmoLEM):
             filepath=filepath,
             epsg=self.epsg
         )
-        
-    def save_grid_asc(
+    
+    def create_cut_grid(
         self,
-        field_name
+        x_of_center : float,
+        y_of_center : float,
+        radius : float = 5000.
     ):
-        pass
+        
+        """
+        Returns a new Basin instances with the topographic__elevation
+        field cut to the desired coordinates.
+        """
+        
+        # Filter the nodes by x and y position
+        x_ll_exact = x_of_center - radius 
+        y_ll_exact = y_of_center - radius
+        
+        x_ur_exact = x_of_center + radius 
+        y_ur_exact = y_of_center + radius 
+        
+        x_include = np.logical_and(
+            self.x_of_node>x_ll_exact,
+            self.x_of_node<x_ur_exact
+        )
+        y_include = np.logical_and(
+            self.y_of_node>y_ll_exact,
+            self.y_of_node<y_ur_exact
+        )
+        id_include = np.logical_and(
+            x_include, y_include
+        )
+        
+        # Find shape
+        nrows = len(np.unique(self.y_of_node[id_include]))
+        ncols = len(np.unique(self.x_of_node[id_include]))        
+        
+        z_out = self.at_node["topographic__elevation"][id_include]
+        xy_ll_node = (self.x_of_node[id_include].min(), self.y_of_node[id_include].min())
+        dx = self.dx 
+        
+        # TODO: We might need to add a shift to xy_ll_node of -dx*0.5
+        
+        grid_out = RasterModelGrid(
+            shape=(nrows, ncols),
+            xy_spacing=dx,
+            xy_of_lower_left=xy_ll_node
+        )
+        grid_out.add_zeros("topographic__elevation")
+        grid_out.at_node["topographic__elevation"] = z_out
+        
+        return grid_out
+        
