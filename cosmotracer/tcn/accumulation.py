@@ -3,12 +3,76 @@ import os, logging, time
 logger = logging.getLogger(__name__)
 from cosmotracer.tcn import calculate_xyz_scaling_factors
 
-class IntegrationError(Exception):
+class DepthIntegrationError(Exception):
     """
     Throw this error in case depth cannot be properly integrated
     for transient concentrations.
     """
     pass
+
+def calculate_depth_interval_concentration(
+    z0: float | np.ndarray, # column depth in m
+    z1: float | np.ndarray, # column depth, we assume that z1 < z0 (the sample moves towards the surface)
+    exhumation_rate: float | np.ndarray, # this value is greater than zero
+    production_rate: float | np.ndarray = 1.,
+    attenuation_length: float = 160.,
+    bulk_density: float = 2.7,
+    halflife: float = np.inf,
+    initial_concentration: float | np.ndarray = 0.
+) -> float | np.ndarray:
+    """
+    Calculate the concentration of a sample as it is exhumed towards the surface from z0 to z1
+    at rate exhumation_rate.
+    
+    Parameters:
+    -----------
+        z0: float | np.ndarray
+            Initial depth. Either a single float > 0. or an array of shape (n,).
+        z1 float | np.ndarray
+            Final depth. Either a single float >= 0. or an array of shape (n,).
+        exhumation_rate: float | np.ndarray
+            Rate at which the sample moves towards the surface, or rate at which sample moves
+            from z0 to z0. Either a single float or an array of shape (n,).
+        production rate: float | np.ndarray
+            Surface production rate at each point in at/g/yr. Single float 
+            or array of shape (n,). Default is 1 at/g/yr
+        attenuation_length: float
+            The attenuation length in g/cm^2. Default is 160 g/cm^2
+        bulk_density: float
+            The bulk density in g/cm^3. Default is 2.7 g/cm^3
+        halflife: float
+            The halflife of the CRN in question. Default assumes a stable nuclide.
+        initial_concentration: float | np.ndarray
+            The concentration that the sample has at z0. Default is 0 at/g. Must be single float
+            or array of shape (n.).
+    
+    Returns:
+    --------
+        concentrations: float | np.ndarray
+            A single float or an array of concentrations.
+    """
+    
+    # Introduce some shorthand and convert units
+    rho = bulk_density * 1e2**3 # g/m^3
+    att = attenuation_length * 1e2**2  # g/m^2
+    p0 = production_rate 
+    e = exhumation_rate
+    decay = np.log(2) / halflife
+    mu = rho/att    
+    
+    # t0 = 0
+    t1 = (z0-z1) / e
+    
+    # decay of initial concentration
+    c0 = initial_concentration*np.exp(-decay*t1)
+    
+    # fraction
+    frac = p0*np.exp(-decay*t1) / (decay+mu*e)
+    
+    # main term
+    concentration = frac*(np.exp(t1*(decay+mu*e)-mu*z0) - np.exp(-z0*mu)) + c0 
+    
+    return concentration
 
 def calculate_steady_state_erosion(
     concentration : np.ndarray | float,
@@ -21,14 +85,22 @@ def calculate_steady_state_erosion(
     return e
 
 def calculate_steady_state_concentration(
-    erosion_rate : float,
+    exhumation_rate : float,
     bulk_density : float = 2.7,
     production_rate : float = 1.,
     attenuation_length : float = 160.,
     halflife : float = np.inf
 ):
+    """
+    Calculate the surface concetration for a sample exhumed at constant rate exhumation_rate.
+    
+    Parameters:
+    -----------
+        exhumation_rate : float
+            Erosion rate in m/yr
+    """
     lambd = np.log(2) / halflife
-    conc = production_rate / (lambd + bulk_density*1e2*erosion_rate/attenuation_length)
+    conc = production_rate / (lambd + bulk_density*1e2*exhumation_rate/attenuation_length)
     return conc
 
 def calculate_transient_concentration(
@@ -109,7 +181,7 @@ def calculate_transient_concentration(
     ### accurately calculating concentrations for fast erosion rates and shallow integration depths.
     ### This is because the depth integration criterion is fullfiled by rounding up the considered 
     ### column depth to the nearest value larger than the depth integration threshold.
-    ### This has the effect of using much larger column depths for very long time steps. If the erosion
+    ### This results in using much larger column depths for very long time steps. If the erosion
     ### is fast, concentration loss by radioactive decay can be almost completely ignored and thus,
     ### the benefit of using larger total depths outweights the inaccuracy in calculated radioactive decay.
     
@@ -166,9 +238,8 @@ def calculate_transient_concentration(
                 f"Function interrupted because `throw_integration_error` is {throw_integration_error}:\n"
                 f"\tColumn depth for at least one sample is: {coldep[-1,:].min():.2f}\n"
                 f"\tColumn depth is smaller than required `depth_integration` {depth_integration:.2f}\n"
-            
             )
-            raise IntegrationError("Exhumation history does not allow integration over desired depth_integration")
+            raise DepthIntegrationError("Exhumation history does not allow integration over desired depth_integration")
 
         reached_integration = False
         
@@ -251,8 +322,10 @@ def calculate_transient_concentration(
     # print("Integrating concentration")
     
     for i in list(range(1, n + 1))[::-1]:
+        
         P0 = prod*scaling_factors[i,:]
         P1 = prod*scaling_factors[i-1,:]
+        
         
         C0 = coldep[i,:]
         C1 = coldep[i-1,:]
@@ -318,7 +391,7 @@ if __name__ == "__main__":
      )[:,0]
      
      ss_conc = calculate_steady_state_concentration(
-         erosion_rate=exhum[0,:],
+         exhumation_rate=exhum[0,:],
          production_rate=116.*sf
      )
      print(ss_conc)

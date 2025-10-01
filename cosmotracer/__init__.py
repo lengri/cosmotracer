@@ -7,6 +7,7 @@ from . import synthetic
 from . import tcn 
 from . import topo 
 from . import utils 
+from . import geometry 
 
 # Make some central classes and functions available
 # at top level

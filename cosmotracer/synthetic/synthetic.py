@@ -33,6 +33,8 @@ from cosmotracer.tcn.accumulation import (
     calculate_transient_concentration
 )
 
+from cosmotracer.topo import calculate_segmented_ksn
+
 # Cache dir and file name. Change only if you know what you're doing...
 class ParseError(Exception):
     pass
@@ -61,7 +63,7 @@ class CosmoLEM(RasterModelGrid):
         m_sp : float = 0.5,
         shape : tuple = (100, 100),
         xy_spacing : float = 10.,
-        xy_of_lower_left : bool = (500_000, 0.),
+        xy_of_lower_left : bool = (500_000, 0.), # avoids out of bounds with UTM
         allow_cache : bool = False,
         fail_on_overwrite : bool = True,
         identifier : int | str = 0,
@@ -130,8 +132,10 @@ class CosmoLEM(RasterModelGrid):
             fail_on_overwrite=fail_on_overwrite
         )
         
+        # Init RasterModelGrid
         # The initiated grid will always be a east-facing basin
         # unless the user supplies some array to z_init.
+        RasterModelGrid(shape=shape, xy_spacing=xy_spacing, xy_of_lower_left=xy_of_lower_left)
         super().__init__(
             shape=shape,
             xy_spacing=xy_spacing,
@@ -396,18 +400,20 @@ class CosmoLEM(RasterModelGrid):
                 dt_step=dt
             )
             logger.info(f"Updated cachekey to {self.cachekey}")
-            self._z = self._cache.load_file(
+            cached_field = self._cache.load_file(
                 filekey=self.cachekey
             )
             logger.info("Attempted to load file from cache")
         
         # If we haven't assigned any array to self._z, something has gone wrong.
-        if self._z is None:
+        if cached_field is None:
             logger.error(
                 f"No data for {field_name} could be loaded\n"
                 f"If data was loaded from cache, no file with name {self.cachekey} was found."
             )
-            raise Exception("Could not load any model; self._z is None")
+            raise FileNotFoundError("Could not load any model; self._z is None")
+        else:
+            self._z = cached_field # only set _z to loaded cache if everything was successful
         
         self.at_node[field_name] = self._z
         
@@ -425,6 +431,67 @@ class CosmoLEM(RasterModelGrid):
         else:
             logger.info("Did not run FlowAccumulator because field_name != 'topographic__elevation'")
                     
+    def cut_grid(
+        self,
+        x_of_center: float,
+        y_of_center: float,
+        radius: float
+    ) -> "CosmoLEM":
+        """
+        Return a new CosmoLEM instance with the topographic__elevation
+        field clipped to a rectangular window around (x_of_center, y_of_center).
+
+        The clipped domain will always be rectangular (aligned with grid spacing),
+        even if radius implies a circular selection.
+        """
+        dx = self.dx
+        epsg = self.epsg
+
+        # Bounding box (rectangular cut)
+        x_min = x_of_center - radius
+        x_max = x_of_center + radius
+        y_min = y_of_center - radius
+        y_max = y_of_center + radius
+
+        # Convert to nearest grid nodes (ensures alignment with grid)
+        x_nodes = np.unique(self.x_of_node)
+        y_nodes = np.unique(self.y_of_node)
+
+        x_ll = x_nodes[x_nodes >= x_min].min()
+        x_ur = x_nodes[x_nodes <= x_max].max()
+        y_ll = y_nodes[y_nodes >= y_min].min()
+        y_ur = y_nodes[y_nodes <= y_max].max()
+
+        # Node mask for rectangular subset
+        id_include = np.where(
+            (self.x_of_node >= x_ll) & (self.x_of_node <= x_ur) &
+            (self.y_of_node >= y_ll) & (self.y_of_node <= y_ur)
+        )[0]
+
+        # Shape of new grid
+        nrows = len(np.unique(self.y_of_node[id_include]))
+        ncols = len(np.unique(self.x_of_node[id_include]))
+
+        # Extract elevation and reshape to raster
+        z_out = self.at_node["topographic__elevation"][id_include]
+        z_out = z_out.reshape((nrows, ncols))
+
+        # Lower-left corner
+        xy_ll_node = (x_ll, y_ll)
+
+        # Create a fresh CosmoLEM instance
+        new_grid = CosmoLEM(
+            z_init=z_out.flatten(),
+            n_sp=self.n_sp,
+            m_sp=self.m_sp,
+            shape=(nrows, ncols),
+            xy_spacing=dx,
+            xy_of_lower_left=xy_ll_node,
+            identifier=self.identifier,
+            epsg=epsg
+        )
+
+        return new_grid
     
     def _init_grid(
         self,
@@ -500,6 +567,7 @@ class CosmoLEM(RasterModelGrid):
             f"dim{self.shape[0]}{self.shape[1]}",
             f"T{t_use}",
             f"dt{dt_use}",
+            f"dx{self.dx}",
             f"U{u_use}",
             f"K_sp{k_use}",
             f"n_sp{self.n_sp}",
@@ -611,7 +679,7 @@ class CosmoLEM(RasterModelGrid):
         prod = xyz_scaling*topo_shielding*production_rate_SLHL
         
         self.at_node[f"tcn__nuclide_concentration_{production_pathway}"][self.core_nodes] = calculate_steady_state_concentration(
-            erosion_rate = self.at_node["exhumation_rate"][self.core_nodes],
+            exhumation_rate=self.at_node["exhumation_rate"][self.core_nodes],
             bulk_density=bulk_density,
             production_rate=prod,
             attenuation_length=attenuation_length,
@@ -801,7 +869,8 @@ class CosmoLEM(RasterModelGrid):
         method : str = "slope-area", # alternative: chi-segment
         reference_concavity : float = 0.5,
         cp_data_structure : dict = {},
-        segment_break_ids : list = []
+        segment_break_ids : list = [],
+        bad_node_value : int | float = -1,
     ):
         """
         possible methods: "slope-area", "chi-segment", "delta-chi"
@@ -847,14 +916,35 @@ class CosmoLEM(RasterModelGrid):
                         chi_slopes[-1] = chi_slopes[-2] 
                         
                         self.at_node["channel__steepness_index"][ids]= chi_slopes
-                    
+                    else:
+                        self.at_node["channel__steepness_index"][ids] = bad_node_value
+        
         elif method == "chi-segment":
             
-            pass
+            # Write nested lists for id, chi, z.
+            ids = []
+            chis = []
+            zs = []
+            for outlet in cp_data_structure.keys():
+                for segment in cp_data_structure[outlet].keys():
+                    ids.append(cp_data_structure[outlet][segment]["ids"])
+                    chis.append(self.at_node["channel__chi_index"][ids[-1]])
+                    zs.append(self.at_node["topographic__elevation"][ids[-1]])
+                    
+            slopes = calculate_segmented_ksn(
+                id_segments=ids,
+                chi_segments=chis,
+                z_segments=zs,
+                additional_break_ids=segment_break_ids,
+                bad_segment_value=bad_node_value
+            )
             
+            for i, _ids in enumerate(ids):
+                self.at_node["channel__steepness__index"][_ids] = slopes[i]
+               
         else:
-            raise Exception("method keyword not valid!")
-        pass 
+            raise Exception("Method keyword not valid!")        
+        
     
 def _is_numeric(value):
     if type(value) == np.ndarray: return False 

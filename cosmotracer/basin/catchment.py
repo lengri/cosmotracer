@@ -6,7 +6,6 @@ but has many additional capabilities.
 
 from cosmotracer.synthetic.synthetic import CosmoLEM
 from cosmotracer.utils.filing import (
-    export_array_to_gpkg,
     export_watershed_to_gpkg
 )
 from cosmotracer.utils.wrappers import (
@@ -153,54 +152,4 @@ class Basin(CosmoLEM):
             epsg=self.epsg
         )
     
-    def create_cut_grid(
-        self,
-        x_of_center : float,
-        y_of_center : float,
-        radius : float = 5000.
-    ):
-        
-        """
-        Returns a new Basin instances with the topographic__elevation
-        field cut to the desired coordinates.
-        """
-        
-        # Filter the nodes by x and y position
-        x_ll_exact = x_of_center - radius 
-        y_ll_exact = y_of_center - radius
-        
-        x_ur_exact = x_of_center + radius 
-        y_ur_exact = y_of_center + radius 
-        
-        x_include = np.logical_and(
-            self.x_of_node>x_ll_exact,
-            self.x_of_node<x_ur_exact
-        )
-        y_include = np.logical_and(
-            self.y_of_node>y_ll_exact,
-            self.y_of_node<y_ur_exact
-        )
-        id_include = np.logical_and(
-            x_include, y_include
-        )
-        
-        # Find shape
-        nrows = len(np.unique(self.y_of_node[id_include]))
-        ncols = len(np.unique(self.x_of_node[id_include]))        
-        
-        z_out = self.at_node["topographic__elevation"][id_include]
-        xy_ll_node = (self.x_of_node[id_include].min(), self.y_of_node[id_include].min())
-        dx = self.dx 
-        
-        # TODO: We might need to add a shift to xy_ll_node of -dx*0.5
-        
-        grid_out = RasterModelGrid(
-            shape=(nrows, ncols),
-            xy_spacing=dx,
-            xy_of_lower_left=xy_ll_node
-        )
-        grid_out.add_zeros("topographic__elevation")
-        grid_out.at_node["topographic__elevation"] = z_out
-        
-        return grid_out
-        
+    

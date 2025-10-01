@@ -78,27 +78,6 @@ def export_watershed_to_gpkg(
 
     # Export
     gdf.to_file(filepath, driver="GPKG")
-    
-def export_array_to_gpkg(
-    x : np.ndarray,
-    y : np.ndarray,
-    data : dict,
-    epsg : int,
-    filepath : str,
-    layer : str = "points"
-):
-    """
-    Takes all x, y, field data of nodes that are != empty_value
-    and constructs a GeoPackage of points with attached values
-    """
-    
-    points = [Point(xx, yy) for xx, yy in zip(x, y)]
-    gdf = gpd.GeoDataFrame(geometry=points, crs=f"EPSG:{epsg}")
-    
-    for k in data.keys():
-        gdf[k] = data[k]
-    
-    gdf.to_file(filepath, layer=layer, driver="GPKG")
 
 PACKAGE_NAME = "cosmotracer"
       
