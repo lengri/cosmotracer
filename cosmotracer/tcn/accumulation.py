@@ -1,5 +1,5 @@
 import numpy as np
-import os, logging, time
+import logging, time
 logger = logging.getLogger(__name__)
 from cosmotracer.tcn import calculate_xyz_scaling_factors
 
@@ -322,7 +322,7 @@ def calculate_transient_concentration(
     # print("Integrating concentration")
     
     for i in list(range(1, n + 1))[::-1]:
-        
+
         P0 = prod*scaling_factors[i,:]
         P1 = prod*scaling_factors[i-1,:]
         
