@@ -12,7 +12,8 @@ from landlab.components import (
     FlowAccumulator,
     StreamPowerEroder,
     SteepnessFinder,
-    ChannelProfiler
+    ChannelProfiler,
+    LakeMapperBarnes
 )
 from landlab import RasterModelGrid
 from landlab import NodeStatus
@@ -63,11 +64,12 @@ class CosmoLEM(RasterModelGrid):
         m_sp : float = 0.5,
         shape : tuple = (100, 100),
         xy_spacing : float = 10.,
-        xy_of_lower_left : bool = (500_000, 0.), # avoids out of bounds with UTM
+        xy_of_lower_left : tuple = (500_000, 0.), # avoids out of bounds with UTM
         allow_cache : bool = False,
         fail_on_overwrite : bool = True,
         identifier : int | str = 0,
-        epsg : int | None = 32611
+        epsg : int | None = 32611,
+        fill_initial_sinks: bool = False
     ) -> None:
         
         """
@@ -105,6 +107,8 @@ class CosmoLEM(RasterModelGrid):
             epsg : int | None
                 The EPSG code for the coordinate system. This has to be defined when tracking transient
                 concentrations.
+            fill_initial_sinks: bool
+                Option to fill sinks in an initially created random topography, using LakeMapperBarnes.
 
         """ 
         
@@ -131,17 +135,18 @@ class CosmoLEM(RasterModelGrid):
             allow_cache=allow_cache,
             fail_on_overwrite=fail_on_overwrite
         )
+        self.outlet_position = "None"
         
         # Init RasterModelGrid
         # The initiated grid will always be a east-facing basin
         # unless the user supplies some array to z_init.
-        RasterModelGrid(shape=shape, xy_spacing=xy_spacing, xy_of_lower_left=xy_of_lower_left)
+        # RasterModelGrid(shape=shape, xy_spacing=xy_spacing, xy_of_lower_left=xy_of_lower_left)
         super().__init__(
             shape=shape,
             xy_spacing=xy_spacing,
             xy_of_lower_left=xy_of_lower_left
         )
-        self._init_grid(field_name="topographic__elevation")
+        self._init_grid(field_name="topographic__elevation", fill_initial_sinks=fill_initial_sinks)
         
         # create the cachekey
         self._update_cachekey()
@@ -184,7 +189,7 @@ class CosmoLEM(RasterModelGrid):
         self.tracked_nodes = None
         self.tracked_exhumation = None
         self.tracked_z = None
-        self.tracked_transient_concentrations = None
+        self.tracked_transient_concentration = None
         
         logger.info(
             f"Successfully initialised CosmoLEM instance"
@@ -249,6 +254,8 @@ class CosmoLEM(RasterModelGrid):
         
         self.status_at_node[outlet_id]= NodeStatus.FIXED_VALUE
         
+        self.outlet_position = location
+        
         return outlet_id
     
     def run_one_spl_step(
@@ -290,12 +297,12 @@ class CosmoLEM(RasterModelGrid):
             self, K_sp=K_sp, m_sp=self.m_sp, n_sp=self.n_sp
         )
 
-        z_old = self._z.copy()
-        self._z[self.core_nodes] += U*dt
+        z_old = self.at_node["topographic__elevation"].copy()
+        self.at_node["topographic__elevation"][self.core_nodes] += U*dt
         self.fa.run_one_step() # update flow routing
         self.spl.run_one_step(dt=dt) # erode landscape
         
-        exhum = (U*dt - (self._z - z_old)) / dt 
+        exhum = (U*dt - (self.at_node["topographic__elevation"] - z_old)) / dt 
         self.at_node["exhumation_rate"] = exhum
         
         logger.info(
@@ -334,6 +341,7 @@ class CosmoLEM(RasterModelGrid):
         
         if filepath is not None:
             # use landlabs native asc saving function
+
             with open(filepath, "w") as f:
                 esri_ascii.dump(
                     self, stream=f, name=field_name, at="node"
@@ -415,7 +423,7 @@ class CosmoLEM(RasterModelGrid):
         else:
             self._z = cached_field # only set _z to loaded cache if everything was successful
         
-        self.at_node[field_name] = self._z
+        self.at_node[field_name] = self._z.copy()
         
         # we need to create a new FA
         if field_name == "topographic__elevation":
@@ -496,7 +504,8 @@ class CosmoLEM(RasterModelGrid):
     def _init_grid(
         self,
         field_name : str = "topographic__elevation",
-        seed : int | None = None
+        seed : int | None = None,
+        fill_initial_sinks: bool = False
     ):
         """
         Initiate the a new grid, either by loading from Cache or by creating a new random initial topography.
@@ -523,13 +532,30 @@ class CosmoLEM(RasterModelGrid):
             # save field values
             self._z = init_values
             
-            logger.info(f"Constructed noisy initial topography {field_name}")      
+            logger.info(f"Constructed noisy initial topography {field_name}") 
              
         # self.set_closed_boundaries_at_grid_edges(True,True,False,True)
         self.add_zeros(
             field_name, at="node"
         )
         self.at_node[field_name] = self._z 
+        
+        if fill_initial_sinks:
+            # run a flow accumulator and a laker mapper to avoid sinks?
+            fa = FlowAccumulator(
+                self,
+                flow_director="FlowDirectorD8",
+                depression_finder="DepressionFinderAndRouter"
+            )
+            fa.run_one_step()
+            lmb = LakeMapperBarnes(
+                grid=self,
+                method="D8",
+                fill_flat=False,
+                redirect_flow_steepest_descent=True,
+                ignore_overfill=True
+            )
+            lmb.run_one_step()
         
         logger.info(f"Set field values for field {field_name}")
 
@@ -572,9 +598,10 @@ class CosmoLEM(RasterModelGrid):
             f"K_sp{k_use}",
             f"n_sp{self.n_sp}",
             f"m_sp{self.m_sp}",
+            f"outlet{self.outlet_position}",
             f"key{self.identifier}"
         ]
-        self.cachekey = "_".join(cache_components) + ".h5"  
+        self.cachekey = "_".join(cache_components) + ".hdf5"  
         
         logger.info(f"Updated cachekey to {self.cachekey} at runtime {self.step_info['T_total']}")
     
@@ -610,7 +637,7 @@ class CosmoLEM(RasterModelGrid):
                 The TCN of interest. Must be "He", "Be", "C", or "Al". Default is "He".
             opt_args : dict
                 Dict of optional arguments passed on to 
-                cosmotracer.calculate_xyz_scaling_factors().
+                cosmotracer.tcn.calculate_xyz_scaling_factors().
         """
         scaling = calculate_xyz_scaling_factors(
             x=self.x_of_node[self.core_nodes],
@@ -702,10 +729,11 @@ class CosmoLEM(RasterModelGrid):
         if self.tracked_nodes is None:
             raise Exception("self.tracked_nodes must be a 1d array of ids.")
         
-        # check if the arrays already exist. If not, create them now.
+        # check if the arrays already exist. If not, create them now. We also do this in case
+        # only one of them doesn't exist, since we have to avoid differently sized arrays.
         if self.tracked_exhumation is None or self.tracked_z is None:
-            self.tracked_exhumation = self.at_node["exhumation_rate"][self.tracked_nodes].reshape(1,len(self.tracked_nodes))
-            self.tracked_z = self.at_node["topographic__elevation"][self.tracked_nodes].reshape(1,len(self.tracked_nodes))
+            self.tracked_exhumation = self.at_node["exhumation_rate"][self.tracked_nodes].reshape((1,len(self.tracked_nodes)))
+            self.tracked_z = self.at_node["topographic__elevation"][self.tracked_nodes].reshape((1,len(self.tracked_nodes)))
     
         else:
             # NOTE: The stacking is such that the newest step is always at position [n] 
@@ -730,10 +758,12 @@ class CosmoLEM(RasterModelGrid):
         self,
         bulk_density : float = 2.7,
         production_rate_SLHL : float = 1.,
+        production_pathway: str = "sp",
         attenuation_length : float = 160.,
         halflife : float = np.inf,
         depth_integration : float = 1.,
-        nuclide : str = "He"
+        nuclide : str = "He",
+        
     ):
         """
         Calculates the transient nuclide concentrations for model-tracked nodes 
@@ -777,12 +807,13 @@ class CosmoLEM(RasterModelGrid):
             f"Tracked node exhumation and elevation for tracked nodes at runtime {self.step_info['T_total']}"
         )
         # with this data, we can calculate transient concentrations for the current time-step.
-        tracked_concs, _ = calculate_transient_concentration(
+        tracked_concs, surface_production = calculate_transient_concentration(
             exhumation_rates=self.tracked_exhumation,
             dt=self.step_info["dt"],
             surface_elevations=self.tracked_z,
             depth_integration=depth_integration,
             production_rate=production_rate_SLHL,
+            production_pathway=production_pathway,
             halflife=halflife,
             bulk_density=bulk_density,
             attenuation_length=attenuation_length,
@@ -796,14 +827,17 @@ class CosmoLEM(RasterModelGrid):
             f"Calculated transient concentrations at runtime {self.step_info['T_total']}"
         )
         
+        # update the Model field containing scaling factors of the current pathway
+        self.at_node[f"tcn__scaling_{production_pathway}"][self.tracked_nodes] = surface_production/production_rate_SLHL
+        
         # Create a new tracked_transient_concentrations stack, if this is the first step
-        if self.tracked_transient_concentrations is None:
-            self.tracked_transient_concentrations = tracked_concs.reshape(1,len(self.tracked_nodes))
+        if self.tracked_transient_concentration is None:
+            self.tracked_transient_concentration = tracked_concs.reshape(1,len(self.tracked_nodes))
         # Or add it to the existing stack
         else:
-            self.tracked_transient_concentrations = np.vstack(
+            self.tracked_transient_concentration = np.vstack(
                 (
-                    self.tracked_transient_concentrations,
+                    self.tracked_transient_concentration,
                     tracked_concs
                     
                 )
@@ -871,6 +905,7 @@ class CosmoLEM(RasterModelGrid):
         cp_data_structure : dict = {},
         segment_break_ids : list = [],
         bad_node_value : int | float = -1,
+        SteepnessFinder_args: dict = {}
     ):
         """
         possible methods: "slope-area", "chi-segment", "delta-chi"
@@ -880,13 +915,17 @@ class CosmoLEM(RasterModelGrid):
             sf = SteepnessFinder(
                 self,
                 reference_concavity=reference_concavity,
-                min_drainage_area=min_drainage_area
+                min_drainage_area=min_drainage_area,
+                **SteepnessFinder_args
             )
             sf.calculate_steepnesses()
             return None # end here
 
+        # Manually add the steepness index field here  
+        print("hi there")  
+        self.add_zeros("channel__steepness_index", clobber=True)
+        print("hi there 2")
         # Get the channel nodes
-        self.add_field("channel__steepness_index", clobber=True)
         if cp_data_structure == {}:
             cp = ChannelProfiler(
                 self, 
@@ -897,15 +936,16 @@ class CosmoLEM(RasterModelGrid):
             cp_data_structure = cp.data_structure
         
         # Use centered finite difference if method is chi-segment
-        
         if method == "delta-chi":
             
-            # loop over every array
+            # loop over every outlet
             for outlet in cp_data_structure.keys():
+                # loop over all segments in current tree
                 for segment in cp_data_structure[outlet].keys():
                     
                     ids = cp_data_structure[outlet][segment]["ids"]
                     
+                    # calculate pointwise slopes of segments that are long enough
                     if len(ids) > 2:
                         zs = self.at_node["topographic__elevation"][ids]
                         chis = self.at_node["channel__chi_index"][ids]
@@ -935,12 +975,12 @@ class CosmoLEM(RasterModelGrid):
                 id_segments=ids,
                 chi_segments=chis,
                 z_segments=zs,
-                additional_break_ids=segment_break_ids,
+                segment_break_ids=segment_break_ids,
                 bad_segment_value=bad_node_value
             )
             
             for i, _ids in enumerate(ids):
-                self.at_node["channel__steepness__index"][_ids] = slopes[i]
+                self.at_node["channel__steepness_index"][_ids] = slopes[i]
                
         else:
             raise Exception("Method keyword not valid!")        
@@ -1041,19 +1081,8 @@ class SyntheticDistribution():
 
 if __name__ == "__main__":
 
-    vals = np.random.normal(1000, 50, 5000)
-    
-    dist = distribution_from_sample(
-        vals, 10
-    )
-    
-    sd = SyntheticDistribution(vals, 10)
-    sd.draw_sample(200)
-    sd.repeat_n_draws(n=10, size=200)
-    print(sd.repeat_mfs)
-    
-    import matplotlib.pyplot as plt
-    plt.plot(sd.x, sd.y)
-    plt.plot(sd.x, sd.sample_y)
-    plt.plot(dist.x, dist.density)
-    plt.show()
+    grid = CosmoLEM()
+    print(grid.at_node["topographic__elevation"])
+    for field in grid.at_node:
+        print(field)
+

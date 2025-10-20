@@ -5,15 +5,15 @@ functions.
 
 
 """
-
-from landlab import RasterModelGrid
 import numpy as np
 import scipy as sp
 import matplotlib.pyplot as plt
+
+from landlab import RasterModelGrid, NodeStatus
 from landlab.utils import get_watershed_mask
 
 def calculate_node_flow_distances(
-    grid,
+    grid: RasterModelGrid,
     sink_node : int
 ):
     """
@@ -54,6 +54,7 @@ def calculate_flow_path_to_node(
     source_node : int,
     sink_node : int
 ) -> tuple[list, float]:
+    
     current = source_node 
     distance = 0. 
     node_list = [source_node]
@@ -122,11 +123,11 @@ def map_node_values_upstream(
     return grid
 
 def interpolate_field_values(
-    grid,
-    node_field_name,
-    y_coords,
-    x_coords
-):
+    grid: RasterModelGrid,
+    node_field_name: str,
+    y_coords: np.ndarray,
+    x_coords: np.ndarray
+) -> np.ndarray:
     
     field_data = grid.at_node[node_field_name].reshape(grid.shape)
 
@@ -147,15 +148,26 @@ def interpolate_field_values(
 
     return interpolated_values
     
-def cut_grid_to_watershed(grid, watershed_mask):
+def cut_grid_to_watershed(
+    grid: RasterModelGrid, 
+    watershed_mask: np.ndarray
+) -> RasterModelGrid:
     """
     Using the watershed mask, search for the bounding box around the
     watershed and use that to create a cut basin DEM with correct georeferencing.
     """
     
+    z = grid.at_node["topographic__elevation"].reshape(grid.shape)
+    extent = [
+        grid.x_of_node.min(),
+        grid.x_of_node.max(),
+        grid.y_of_node.min(),
+        grid.y_of_node.max()
+    ]
+    
     # first. find the watershed extent...
     mask = watershed_mask.reshape(grid.shape)
-    
+
     # we can just add up all rows and check the first and last row not zero
     # and do the same for all columns...
     sum_of_cols = np.sum(mask, axis=0) # this is for jmin and jmax
@@ -175,9 +187,11 @@ def cut_grid_to_watershed(grid, watershed_mask):
     if dx != dy:
         raise Exception("Cell side lengths dx, dy must be equal!")
     
-    lin_ind = np.ravel_multi_index((i_min, j_min), grid.shape)
+    # The 0, 0 position in an ascii file corresponds to the lower left corner.
+    # thus, we need to use i_min, j_min as our new ll corner!
+    lin_ind = np.ravel_multi_index((i_min, j_min), grid.shape) 
     new_x_ll = grid.x_of_node[lin_ind]
-    new_y_ll = grid.y_of_node[lin_ind]    
+    new_y_ll = grid.y_of_node[lin_ind]   
     
     #new_x_ll = xy_ll[0] + j_min*dx
     #new_y_ll = xy_ll[1] + (grid.shape[0]-1-i_max)*dy
@@ -196,17 +210,21 @@ def cut_grid_to_watershed(grid, watershed_mask):
         zout = zout[i_min:i_max,j_min:j_max]
         
     # grid.at_node["topographic__elevation"] = zout
+
     
     grid_out = RasterModelGrid(
-        zout.shape, xy_spacing=(dx, dy), xy_of_lower_left=(new_x_ll, new_y_ll)
+        shape=zout.shape, xy_spacing=(dx, dy), xy_of_lower_left=(new_x_ll, new_y_ll)
     )
 
     grid_out.add_zeros("topographic__elevation")
     grid_out.at_node["topographic__elevation"] = zout
+    
     return grid_out
     
     
-def select_watershed(grid):
+def select_watershed(
+    grid: RasterModelGrid
+) -> np.ndarray:
     
     A = grid.at_node["drainage_area"]
     indices = []
@@ -241,6 +259,37 @@ def select_watershed(grid):
     watershed = get_watershed_mask(grid, linear_index)
     
     return watershed
+
+def set_shoreline_nodes_as_outlets(
+    grid: RasterModelGrid,
+    water_value: float | int
+):
+    z = grid.at_node["topographic__elevation"].reshape(grid.shape)
+
+    # Mask of zero elevation cells (sea level)
+    zero_mask = (z == water_value)
+    
+    # Dilate the zero mask to find all neighbors of zero-elevation areas
+    neighbor_mask = sp.ndimage.binary_dilation(zero_mask, structure=np.ones((3,3)))
+    
+    # Outlets are cells that are not 0, but touch 0-elevation cells
+    outlets = (~zero_mask) & neighbor_mask
+
+    # Also include the grid edge 
+    edge_mask = np.zeros_like(z, dtype=bool)
+    edge_mask[0,:] = edge_mask[-1,:] = edge_mask[:,0] = edge_mask[:,-1] = True
+    outlets |= edge_mask & (~zero_mask)
+    
+    outlet_ids = np.arange(0, grid.number_of_nodes, 1)
+    outlet_ids = outlet_ids[outlets.flatten()]
+
+    node_status = np.full(grid.status_at_node.shape, NodeStatus.CLOSED)
+    node_status[grid.at_node["topographic__elevation"]!=water_value] = NodeStatus.CORE
+    node_status[outlet_ids] = NodeStatus.FIXED_VALUE
+    grid.status_at_node = node_status
+    
+    return grid
+    
 
 if __name__ == "__main__":
     

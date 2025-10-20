@@ -13,6 +13,8 @@ import ujson
 from affine import Affine
 from scipy import ndimage
 
+from landlab import RasterModelGrid
+
 def get_cachedir():
     """
     Returns the directory of the cache for cosmotracer.
@@ -41,16 +43,42 @@ def export_points_to_gpkg(
     gdf.to_file(filepath, driver="GPKG")
     
 def export_watershed_to_gpkg(
-    mask,
-    xy_ll_corner,
-    cellsize,
-    filepath,
-    epsg
+    grid: RasterModelGrid,
+    mask: np.ndarray,
+    filepath: str,
+    epsg: int | None = None
 ):
     
-    mask = np.flipud(mask)
+    try:
+        if grid.epsg is not None:
+            epsg = grid.epsg
+    except:
+        if epsg is None:
+            raise Exception("EPSG not supplied by grid or function argument!")
+    
+    # mask has the same alignment as grid!
+    # (0, 0) is lower left corner
+    
+    rows, cols = np.where(mask)
+    # print(grid.xy_of_node[0])
+    # print(grid.xy_of_lower_left)
+    polygons = []
+    for r, c in zip(rows, cols):
+        
+        ilin = np.ravel_multi_index((r, c), grid.shape)
+        xll, yll = grid.xy_of_node[ilin]
+        xtr, ytr = xll+grid.dx, yll+grid.dy
+        
+        pixel_poly = box(xll, yll, xtr, ytr)
+        polygons.append(pixel_poly)
 
-    # Label connected components (watersheds) in the mask
+    gdf = gpd.GeoDataFrame(geometry=polygons, crs=f"EPSG:{epsg}")
+    gdf = gdf.dissolve()
+
+    # Export
+    gdf.to_file(filepath, driver="GPKG")  
+    
+    """# Label connected components (watersheds) in the mask
     labeled, num_features = ndimage.label(mask)
 
     transform = Affine.translation(xy_ll_corner[0], xy_ll_corner[1]) * Affine.scale(cellsize, -cellsize)
@@ -77,7 +105,7 @@ def export_watershed_to_gpkg(
     gdf = gdf.dissolve()
 
     # Export
-    gdf.to_file(filepath, driver="GPKG")
+    gdf.to_file(filepath, driver="GPKG")"""
 
 PACKAGE_NAME = "cosmotracer"
       

@@ -1,5 +1,5 @@
 import numpy as np
-from cosmotracer.utils import linear_regression
+import scipy as sp
 
 def calculate_segmented_ksn(
     id_segments,
@@ -47,8 +47,8 @@ def calculate_segmented_ksn(
     slopes = np.zeros(len(id_segments_use))
     for i, (chi, z) in enumerate(zip(chi_segments_use, z_segments_use)):
         if len(chi) > 1:
-            par, _ = linear_regression(chi, z)
-            slopes[i] = par[1]
+            slope, _, _, _, _ = sp.stats.linregress(chi, z)
+            slopes[i] = slope
         else: 
             slopes[i] = bad_segment_value 
             

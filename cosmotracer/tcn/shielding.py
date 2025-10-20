@@ -176,8 +176,19 @@ if __name__ == "__main__":
         dt=2500
     )
     
-    shielding = calculate_exact_shielding(grid)
+    import time
     
+    start = time.time()
+    shielding = calculate_exact_shielding(grid)
+    end = time.time()
+    
+    print(end-start)
+    
+    start = time.time()
+    shielding = calculate_exact_shielding(grid, filter_ridgelines=True, threshold_quantile=0.5)
+    end = time.time()
+    
+    print(end-start)
     
     fg, ax = plt.subplots(1, 2)
     ax[0].imshow(grid.at_node["topographic__elevation"].reshape(grid.shape), origin="lower")
