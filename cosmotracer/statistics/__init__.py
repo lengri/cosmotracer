@@ -1,1 +1,1 @@
-from .kde import GaussianKDE
+from .kde import GaussianKDE, SyntheticDistribution
