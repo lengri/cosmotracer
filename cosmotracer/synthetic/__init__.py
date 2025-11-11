@@ -1,2 +1,2 @@
-from .synthetic import CosmoLEM
 from .RunHandler import RunHandler
+from .synthetic import CosmoLEM

@@ -1,19 +1,24 @@
-import numpy as np
-import os 
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
 import geopandas as gpd
-from shapely import Point, box
 
 # For caching stuff
-import h5py, platformdirs
-from pathlib import Path
-from datetime import datetime, timezone
+import h5py
+import numpy as np
+import platformdirs
 import ujson
 
 # For the watershed export
-from affine import Affine
-from scipy import ndimage
-
 from landlab import RasterModelGrid
+from shapely import Point, box
+
+class CacheNotFoundError(Exception):
+    pass
+
+class CacheOverwriteError(Exception):
+    pass
 
 def get_cachedir():
     """
@@ -77,35 +82,7 @@ def export_watershed_to_gpkg(
 
     # Export
     gdf.to_file(filepath, driver="GPKG")  
-    
-    """# Label connected components (watersheds) in the mask
-    labeled, num_features = ndimage.label(mask)
 
-    transform = Affine.translation(xy_ll_corner[0], xy_ll_corner[1]) * Affine.scale(cellsize, -cellsize)
-    
-    polygons = []
-
-    for region_id in range(1, num_features + 1):
-        region = labeled == region_id
-        rows, cols = np.where(region)
-
-        for r, c in zip(rows, cols):
-            # Get real-world coordinates of the pixel center
-            x, y = transform * (c, r)
-            x -= cellsize/2 # shift from lower left to cell center
-            y += cellsize/2 # shift from lower left to cell center
-            # Build pixel-sized polygon (square around pixel)
-            pixel_poly = box(x, y - cellsize, x + cellsize, y)
-            polygons.append(pixel_poly)
-
-    # Merge all into one polygon (if desired)
-    crs = f"EPSG:{epsg}"
-
-    gdf = gpd.GeoDataFrame(geometry=polygons, crs=crs)
-    gdf = gdf.dissolve()
-
-    # Export
-    gdf.to_file(filepath, driver="GPKG")"""
 
 PACKAGE_NAME = "cosmotracer"
       
@@ -113,8 +90,10 @@ class ModelCache():
     
     def __init__(
         self,
-        allow_cache = True,
-        fail_on_overwrite = True
+        identifier: str,
+        allow_cache: bool = True,
+        fail_on_overwrite: bool = True,
+        
     ):
         
         # Global options for this Cache instance
@@ -123,55 +102,83 @@ class ModelCache():
         
         # Initialise the cache if it is allowed and does not exist...
         if self.cache_allowed:
-            self.cache_dir : Path = platformdirs.user_cache_path(PACKAGE_NAME)
-            self.cache_dir.mkdir(parents=True, exist_ok=True)        
+            self.cache_dir: Path = platformdirs.user_cache_path(PACKAGE_NAME)
+            self.cache_dir.mkdir(parents=True, exist_ok=True) 
+            
+            # check if the h5 file for the current identifier exists:
+            self.cache_filepath = self.cache_dir / f"{identifier}.h5"
+            if not os.path.isfile(self.cache_filepath):
+                with h5py.File(self.cache_filepath, "w") as _:
+                    pass  # no datasets/groups needed for now
+    
+    def _dataset_exists(self, filekey):
+        
+        with h5py.File(self.cache_filepath, "r") as f: # treat the actual h5 as the primary group
+            group = f
+            for key, value in filekey.items():
+                
+                groupkey = key + f"{value}"
+                
+                if groupkey in group:
+                    group = group[groupkey]
+                else:
+                    return False
+            return True
         
     def load_file(
         self,
         filekey
     ):
         
+        # filekey is a dict containing all the information we need to identify
+        # the grid we want to load/save. We check, bit by bit, if the needed datasets
+        # exist in our h5 file
         # do nothing if there is no caching allowed
         if not self.cache_allowed:
             return None
 
-        cache_filepath = self.cache_dir / filekey
+        if not self._dataset_exists(filekey=filekey):
+            raise CacheNotFoundError(
+                f"Could not find dataset with key {filekey} "
+                f"in {self.cache_filepath}"
+            )
         
-        try:
-            with h5py.File(cache_filepath, "r") as h5:
-                dataset = h5["data"][()]
-                return dataset
-        except Exception as err:
-            print(f"Could not load cache: {err}")
-            return None
-            
+        with h5py.File(self.cache_filepath, "r") as f: # treat the actual h5 as the primary group
+            group = f
+            for key, value in filekey.items():
+                groupkey = key + f"{value}"
+                group = group[groupkey]
+                
+            # load data from final group
+            return group["dataset"][:]
     
     def save_file(
-        self, filekey, array
+        self, filekey, data
     ):
 
         # do nothing here as well
         if not self.cache_allowed:
             return None
         
-        cache_filepath = self.cache_dir / filekey
+        # we have to check if the file exists in "w" mode, otherwise we will overwrite existing info!
+        if self._dataset_exists(filekey=filekey) and self.fail_on_overwrite:
+            raise CacheOverwriteError(
+                f"Saving dataset for current filekey "
+                f"would overwrite existing dataset in {self.cache_filepath}"
+            )
         
-        if self.fail_on_overwrite and os.path.exists(cache_filepath):
-            raise Exception(f"Caching file would overwrite existing file {cache_filepath}")
-        
-        try:
-            with h5py.File(cache_filepath, "w") as h5:
-                h5.create_dataset(
-                    "data",
-                    data=array,
-                    compression="gzip",
-                    compression_opts=4
-                )
-                now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
-                h5.attrs["created"] = now_iso
-        
-        except Exception as err:
-            print(f"Could not write to cache: {err}")
+        with h5py.File(self.cache_filepath, "a") as f: # treat the actual h5 as the primary group
+            group = f
+            for key, value in filekey.items():
+                groupkey = key + f"{value}"
+                
+                if not groupkey in group:
+
+                    group = group.create_group(groupkey)
+                else:
+                    group = group[groupkey]
+
+            group.create_dataset("dataset", shape=data.shape, data=data)
 
 class ScalingCache():
     

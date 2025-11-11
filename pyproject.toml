@@ -38,3 +38,15 @@ packages = [
   "cosmotracer.basin", 
   "cosmotracer.tcn"
 ]
+
+# ruff configuration down here
+[tool.ruff]
+lint.select = ["E", "F", "I", "B", "ANN"]
+exclude = [
+    ".git",
+    "__pycache__"
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Ignore unused imports in __init__.py files
+"__init__.py" = ["F401"]

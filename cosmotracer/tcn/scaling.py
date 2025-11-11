@@ -1,11 +1,9 @@
-import numpy as np
-import pyLSD as lsd 
-import os 
 
-from cosmotracer.utils import (
-    convert_xy_to_latlon,
-    ScalingCache
-)
+import numpy as np
+import pyLSD as lsd
+
+from cosmotracer.utils import ScalingCache, convert_xy_to_latlon
+
 
 def calculate_xyz_scaling_factors(
     x : np.ndarray,
@@ -97,7 +95,7 @@ if __name__ == "__main__":
     XLLCENTER =  344730.0
     YLLCENTER = 3924450.0
 
-    import time 
+    import time
     
     # Run with new created cache
     start0 = time.time()

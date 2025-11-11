@@ -1,7 +1,11 @@
+import logging
+import time
+
 import numpy as np
-import logging, time
+
 logger = logging.getLogger(__name__)
 from cosmotracer.tcn import calculate_xyz_scaling_factors
+
 
 class DepthIntegrationError(Exception):
     """
@@ -11,29 +15,30 @@ class DepthIntegrationError(Exception):
     pass
 
 def calculate_depth_interval_concentration(
-    z0: float | np.ndarray, # column depth in m
-    z1: float | np.ndarray, # column depth, we assume that z1 < z0 (the sample moves towards the surface)
-    exhumation_rate: float | np.ndarray, # this value is greater than zero
-    production_rate: float | np.ndarray = 1.,
+    z0: float|np.ndarray, # column depth in m
+    z1: float|np.ndarray, # column depth, we assume that z1 < z0 (the sample moves towards the surface)
+    exhumation_rate: float|np.ndarray, # this value is greater than zero
+    production_rate: float|np.ndarray = 1.,
     attenuation_length: float = 160.,
     bulk_density: float = 2.7,
     halflife: float = np.inf,
-    initial_concentration: float | np.ndarray = 0.
-) -> float | np.ndarray:
+    initial_concentration: float|np.ndarray = 0.
+) -> float|np.ndarray:
     """
     Calculate the concentration of a sample as it is exhumed towards the surface from z0 to z1
-    at rate exhumation_rate.
+    at rate exhumation_rate. Assumes that the surface production rate at a single point does not
+    vary with time.
     
     Parameters:
     -----------
-        z0: float | np.ndarray
+        z0: float|np.ndarray
             Initial depth. Either a single float > 0. or an array of shape (n,).
-        z1 float | np.ndarray
+        z1 float|np.ndarray
             Final depth. Either a single float >= 0. or an array of shape (n,).
-        exhumation_rate: float | np.ndarray
+        exhumation_rate: float|np.ndarray
             Rate at which the sample moves towards the surface, or rate at which sample moves
             from z0 to z0. Either a single float or an array of shape (n,).
-        production rate: float | np.ndarray
+        production rate: float|np.ndarray
             Surface production rate at each point in at/g/yr. Single float 
             or array of shape (n,). Default is 1 at/g/yr
         attenuation_length: float
@@ -42,13 +47,13 @@ def calculate_depth_interval_concentration(
             The bulk density in g/cm^3. Default is 2.7 g/cm^3
         halflife: float
             The halflife of the CRN in question. Default assumes a stable nuclide.
-        initial_concentration: float | np.ndarray
+        initial_concentration: float|np.ndarray
             The concentration that the sample has at z0. Default is 0 at/g. Must be single float
             or array of shape (n.).
     
     Returns:
     --------
-        concentrations: float | np.ndarray
+        concentrations: float|np.ndarray
             A single float or an array of concentrations.
     """
     
@@ -65,8 +70,6 @@ def calculate_depth_interval_concentration(
     
     # decay of initial concentration
     c0 = initial_concentration*np.exp(-decay*t1)
-    
-    # fraction
     frac = p0*np.exp(-decay*t1) / (decay+mu*e)
     
     # main term
@@ -75,11 +78,11 @@ def calculate_depth_interval_concentration(
     return concentration
 
 def calculate_steady_state_erosion(
-    concentration : np.ndarray | float,
-    bulk_density : np.ndarray | float = 2.7,
-    production_rate : np.ndarray | float = 1.,
-    attenuation_length : np.ndarray | float = 160.,
-    halflife : np.ndarray | float = np.inf
+    concentration : np.ndarray|float,
+    bulk_density : np.ndarray|float = 2.7,
+    production_rate : np.ndarray|float = 1.,
+    attenuation_length : np.ndarray|float = 160.,
+    halflife : np.ndarray|float = np.inf
 ):
     e = (attenuation_length / bulk_density) * (production_rate / concentration - np.log(2)/halflife) / 1e2
     return e
@@ -114,10 +117,10 @@ def calculate_transient_concentration(
     attenuation_length : float = 160,
     nuclide : str = "He",
     production_pathway : str = "sp",
-    northings : np.ndarray | None = None,
-    eastings : np.ndarray | None = None,
-    epsg : int | None = None,
-    inheritance_concentration : np.ndarray | None = None,
+    northings : np.ndarray|None = None,
+    eastings : np.ndarray|None = None,
+    epsg : int|None = None,
+    inheritance_concentration : np.ndarray|None = None,
     throw_integration_error : bool  = False,
     allow_cache : bool = False
 ) -> tuple[np.ndarray, np.ndarray]:

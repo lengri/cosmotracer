@@ -1,6 +1,7 @@
-import scipy as sp
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
+import scipy as sp
+
 
 def gaussian_kernel(x, mu, sigma):
     frac = 1.0 / (sigma * np.sqrt(2.0 * np.pi))

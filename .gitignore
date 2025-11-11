@@ -1,6 +1,8 @@
-cosmotracer.egg-info
+*.egg-info
 __pycache__
 build
 *.pkl
 *.json
 tests
+
+.ruff_cache/

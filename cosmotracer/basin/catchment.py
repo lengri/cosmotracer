@@ -5,27 +5,25 @@ but has many additional capabilities.
 """
 
 # Internal imports
-from cosmotracer.synthetic.synthetic import CosmoLEM
-from cosmotracer.utils.filing import (
-    export_watershed_to_gpkg
+import logging
+import os
+
+import numpy as np
+from landlab import NodeStatus
+from landlab.components import (
+    FlowAccumulator,
+    LakeMapperBarnes,
 )
+from landlab.io import esri_ascii
+
+from cosmotracer.synthetic.synthetic import CosmoLEM
+from cosmotracer.utils.filing import export_watershed_to_gpkg
 from cosmotracer.utils.wrappers import (
     cut_grid_to_watershed,
     select_watershed,
-    set_shoreline_nodes_as_outlets
-    
-)
-from landlab.io import esri_ascii
-from landlab import RasterModelGrid, NodeStatus
-from landlab.components import (
-    FlowAccumulator,
-    LakeMapperBarnes
+    set_shoreline_nodes_as_outlets,
 )
 
-import numpy as np
-import matplotlib.pyplot as plt
-
-import os, logging
 logger = logging.getLogger(__name__)
 
 
@@ -50,7 +48,7 @@ class Basin(CosmoLEM):
         # we can feed it directly into the super CosmoLEM. If it isn't,
         # we let the user select the outlet and cut it now before 
         # initialising the super CosmoLEM.
-        
+
         with open(filepath) as fp:
             grid = esri_ascii.load(
                 stream=fp, 
@@ -68,13 +66,14 @@ class Basin(CosmoLEM):
             )
         
         if not is_catchment_DEM:
-            
+
             # we need to calculate flow routing here
             fa = FlowAccumulator(
                 grid,
                 flow_director="FlowDirectorD8"
             )
             fa.run_one_step()
+            
             logger.info("Ran simple FlowAccumulator (no Depression routing)")
             
             # and since this is a raw DEM, we need to fill depressions
@@ -131,12 +130,16 @@ class Basin(CosmoLEM):
         logger.debug("Initialised cosmotracer.CosmoLEM instance")
         #self.add_zeros("topographic__elevation", at="node")
         #self.at_node["topographic__elevation"] = z[:]
+        
+        # this also sets edge-nodes to fixed value nodes! -> outlet is not a CORE node!
         self.set_nodata_nodes_to_closed(grid.at_node["topographic__elevation"], nodata)
+        i_basin = np.where(
+            self.status_at_node != NodeStatus.CLOSED
+        )[0]
+        i_min = np.argmin(self.at_node["topographic__elevation"][i_basin])
+        li = i_basin[i_min]
         
         # select the outlet node as the lowest elevation core node
-        zcore = self.at_node["topographic__elevation"][self.core_nodes]
-        idmin = np.argmin(zcore)
-        li = self.core_nodes[idmin]
         self.set_watershed_boundary_condition_outlet_id(
             li, 
             self.at_node["topographic__elevation"], 

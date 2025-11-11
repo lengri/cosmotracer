@@ -1,9 +1,8 @@
-import numpy as np
 import matplotlib.pyplot as plt
-from landlab import RasterModelGrid
-from landlab import NodeStatus
-
+import numpy as np
+from landlab import NodeStatus, RasterModelGrid
 from scipy.ndimage import grey_opening
+
 
 def calculate_codlean_shielding():
     print("NOT IMPLEMENTED")

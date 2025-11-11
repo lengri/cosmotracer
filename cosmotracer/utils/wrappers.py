@@ -5,12 +5,12 @@ functions.
 
 
 """
+import matplotlib.pyplot as plt
 import numpy as np
 import scipy as sp
-import matplotlib.pyplot as plt
-
-from landlab import RasterModelGrid, NodeStatus
+from landlab import NodeStatus, RasterModelGrid
 from landlab.utils import get_watershed_mask
+from collections import defaultdict
 
 def calculate_node_flow_distances(
     grid: RasterModelGrid,
@@ -21,9 +21,6 @@ def calculate_node_flow_distances(
     If there is no flow path from a node to the outlet node, the value is set to np.nan
     
     Requires a to-one FlowAccumulator (D4, D8).
-    
-    ID of the receiving node is indicated by axis 1, ID of source node
-    is determined by axis 0.
     """
 
     flow_distances = np.full(
@@ -92,9 +89,10 @@ def map_node_values_upstream(
 
     grid : RasterGrid
     node_field_name : str
-        The name of the field defined at nodes
+        The name of the node-defined field for which values should be propagated.
     empty_value : float
-        The value at an empty field index.
+        The value at an empty field index. This should be a value the field of interest
+        cannot assume under normal circumstances, like -1 when considering chi indices.
     
     Returns
     -------
@@ -157,13 +155,13 @@ def cut_grid_to_watershed(
     watershed and use that to create a cut basin DEM with correct georeferencing.
     """
     
-    z = grid.at_node["topographic__elevation"].reshape(grid.shape)
+    """z = grid.at_node["topographic__elevation"].reshape(grid.shape)
     extent = [
         grid.x_of_node.min(),
         grid.x_of_node.max(),
         grid.y_of_node.min(),
         grid.y_of_node.max()
-    ]
+    ]"""
     
     # first. find the watershed extent...
     mask = watershed_mask.reshape(grid.shape)
@@ -225,7 +223,7 @@ def cut_grid_to_watershed(
 def select_watershed(
     grid: RasterModelGrid
 ) -> np.ndarray:
-    
+
     A = grid.at_node["drainage_area"]
     indices = []
     
@@ -236,7 +234,7 @@ def select_watershed(
         ind = mouseevent.x
         indices.append((x,y))
         return ind
-    
+
     fig, ax = plt.subplots()
     ax.imshow(
         np.log10(A.reshape(grid.shape)+1), 
@@ -289,32 +287,78 @@ def set_shoreline_nodes_as_outlets(
     grid.status_at_node = node_status
     
     return grid
+
+def _build_channels(segments):
+    # adjacency list: start -> list of (start,end) segments
+    graph = defaultdict(list)
+    starts = set()
+    ends = set()
     
+    for s, e in segments:
+        graph[s].append((s, e))
+        starts.add(s)
+        ends.add(e)
+
+    # channel heads = starts that never appear as ends
+    heads = [s for s in starts if s not in ends]
+
+    channels = []
+
+    def dfs(seg, path):
+        start, end = seg
+        path.append(seg)
+
+        if end not in graph:
+            channels.append(path.copy())
+        else:
+            for nxt in graph[end]:
+                dfs(nxt, path)
+
+        path.pop()
+
+    # run dfs from all heads
+    for h in heads:
+        for first in graph[h]:
+            dfs(first, [])
+
+    return channels
+    
+def _extend_channel_segments_to_outlet(
+    channel_dict: dict
+):
+    # build channels from source to sink
+    ext_channel_dict = {}    
+    
+    for outlet, outdict in channel_dict.items():
+        
+        channels = _build_channels(list(outdict.keys()))
+        ext_outlet_dict = {}
+        # go through each channel and stack the ids distances etc
+        for channel in channels:
+                            
+            ids = outdict[channel[0]]["ids"]
+            dists = outdict[channel[0]]["distances"]
+            
+            for seg in channel[1:]:
+                ids = np.concatenate((ids, outdict[seg]["ids"][1:])) # avoid copying the first entry 2x
+                dists = np.concatenate((dists, outdict[seg]["distances"][1:]))
+                
+            # add entry to extended dict
+            ext_outlet_dict[(channel[0][0], channel[-1][1])] = {
+                "ids": ids,
+                "distances": dists
+            }
+        
+        ext_channel_dict[outlet] = ext_outlet_dict
+    
+    return ext_channel_dict
 
 if __name__ == "__main__":
     
-    from landlab.io import esri_ascii 
     from landlab.components import FlowAccumulator
+    from landlab.io import esri_ascii
     
-    with open(r"C:\Users\Lennart\OneDrive\Desktop\phd\Work\Sites\EasternSierras\Data\FIELDWORK\Basins\DEMs\B01-01.asc") as asc_file:
-        grid = esri_ascii.load(
-            stream=asc_file,
-            at="node",
-            name="topographic__elevation"
-        )
-    
-    fa = FlowAccumulator(
-        grid,
-        flow_director="FlowDirectorD8", 
-        depression_finder="DepressionFinderAndRouter"
-    )
-    fa.run_one_step()
-    
-    mask = select_watershed(grid)
-    grid_out = cut_grid_to_watershed(grid, mask)
-    
-    plt.imshow(
-        grid_out.at_node["topographic__elevation"].reshape(grid_out.shape),
-        vmin=0
-    )
-    plt.show()
+    segs = [(8, 20), (20, 25), (20, 112), (25, 60), (112, 114), (112, 604)]
+    out = _build_channels(segs)
+    for c in out:
+        print(c)

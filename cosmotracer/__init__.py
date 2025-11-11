@@ -1,13 +1,15 @@
 # Load submodules here
-from . import basin 
-from . import corrections 
-from . import grainmove 
-from . import statistics 
-from . import synthetic
-from . import tcn 
-from . import topo 
-from . import utils 
-from . import geometry 
+from . import (
+    basin,
+    corrections,
+    geometry,
+    grainmove,
+    statistics,
+    synthetic,
+    tcn,
+    topo,
+    utils,
+)
 
 # Make some central classes and functions available
 # at top level

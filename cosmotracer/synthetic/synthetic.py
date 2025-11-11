@@ -1,40 +1,30 @@
-import numpy as np
-import riserfit as rf 
-import pyLSD as lsd
-from numba import njit
-from riserfit import (
-    DistributionFromInterpolator,
-    distribution_from_sample
-)
-import scipy as sp
+import logging
 
+import numpy as np
+from landlab import NodeStatus, RasterModelGrid
 from landlab.components import (
-    FlowAccumulator,
-    StreamPowerEroder,
-    SteepnessFinder,
     ChannelProfiler,
-    LakeMapperBarnes
+    FlowAccumulator,
+    LakeMapperBarnes,
+    LinearDiffuser,
+    SteepnessFinder,
+    StreamPowerEroder,
 )
-from landlab import RasterModelGrid
-from landlab import NodeStatus
 from landlab.io import esri_ascii
 
-import logging
 logger = logging.getLogger(__name__)
 
 # For saving files
-from cosmotracer.utils.filing import (
-    ModelCache,
-    get_cachedir
-    
-)
 from cosmotracer.tcn import calculate_xyz_scaling_factors
 from cosmotracer.tcn.accumulation import (
     calculate_steady_state_concentration,
-    calculate_transient_concentration
+    calculate_transient_concentration,
 )
-
 from cosmotracer.topo import calculate_segmented_ksn
+from cosmotracer.utils.filing import ModelCache, get_cachedir
+
+def _safe_float(x):
+    return float(x) if x is not None else None
 
 # Cache dir and file name. Change only if you know what you're doing...
 class ParseError(Exception):
@@ -67,7 +57,7 @@ class CosmoLEM(RasterModelGrid):
         xy_of_lower_left : tuple = (500_000, 0.), # avoids out of bounds with UTM
         allow_cache : bool = False,
         fail_on_overwrite : bool = True,
-        identifier : int | str = 0,
+        identifier : int | str = "CLEM",
         epsg : int | None = 32611,
         fill_initial_sinks: bool = False
     ) -> None:
@@ -127,11 +117,14 @@ class CosmoLEM(RasterModelGrid):
             'T_total': 0.,
             "dt": None,
             "U": None,
-            "K_sp": None
+            "K_sp": None,
+            "K_diff": None,
+            "sp_crit": None
         }
         
         # Set up the cache
         self._cache = ModelCache(
+            identifier=identifier,
             allow_cache=allow_cache,
             fail_on_overwrite=fail_on_overwrite
         )
@@ -192,7 +185,7 @@ class CosmoLEM(RasterModelGrid):
         self.tracked_transient_concentration = None
         
         logger.info(
-            f"Successfully initialised CosmoLEM instance"
+            "Successfully initialised CosmoLEM instance"
         )
     
     def set_outlet_position(
@@ -234,23 +227,12 @@ class CosmoLEM(RasterModelGrid):
         outlet_id = np.ravel_multi_index(rc_id, self.shape)
         
         # set all boundary nodes to closed...
-        lin_id_S = np.array([
-            np.ravel_multi_index((0,j), self.shape) for j in range(0,m)
-        ])
-        lin_id_E = np.array([
-            np.ravel_multi_index((i,m-1), self.shape) for i in range(0,n)
-        ])
-        lin_id_N = np.array([
-            np.ravel_multi_index((n-1,j), self.shape) for j in range(0,m)
-        ])
-        lin_id_W = np.array([
-            np.ravel_multi_index((i,0), self.shape) for i in range(0,n)
-        ])
-        
-        self.status_at_node[lin_id_N] = NodeStatus.CLOSED
-        self.status_at_node[lin_id_E] = NodeStatus.CLOSED
-        self.status_at_node[lin_id_S] = NodeStatus.CLOSED
-        self.status_at_node[lin_id_W] = NodeStatus.CLOSED
+        self.set_status_at_node_on_edges(
+            right=NodeStatus.CLOSED,
+            top=NodeStatus.CLOSED,
+            left=NodeStatus.CLOSED,
+            bottom=NodeStatus.CLOSED,
+        )
         
         self.status_at_node[outlet_id]= NodeStatus.FIXED_VALUE
         
@@ -258,12 +240,13 @@ class CosmoLEM(RasterModelGrid):
         
         return outlet_id
     
-    def run_one_spl_step(
+    def run_one_step(
         self,
-        U : float,
+        U : float | np.ndarray,
         K_sp : float,
         dt : float,
-        K_diffusion : float = 0.
+        K_diff : float = 0.,
+        sp_crit: float = 0.        
     ) -> None:
         
         """
@@ -276,31 +259,58 @@ class CosmoLEM(RasterModelGrid):
         Parameters:
         -----------
             U : float
-                The imposed uplift rate (m/yr).
+                The imposed uplift rate (m/yr). Can also be a field corresponding to self.shape.
             K_sp : float
                 The imposed erodibility (units depend on m, n).
             dt : float
                 The time step size (yr).
-            K_diffusion : float
+            K_diff : float
                 If >0, a nonlinear diffusion term is applied to each cell in the model.
         
         """
         
+        # convert float(U) to np.ndarray if wanted
+        # always set non-core nodes to zero!
+        Uarray = np.zeros(self.number_of_nodes)
+        if isinstance(U, np.ndarray):
+            Uarray[self.core_nodes] = U[self.core_nodes] # keep boundaries at 0 uplift rate.
+        else: # treat U as a float!
+            Uarray[self.core_nodes] = U
+        
         self.step_info["dt"] = dt
-        self.step_info["U"] = U 
+        self.step_info["U"] = np.mean(Uarray[self.core_nodes])
         self.step_info['T_total'] += dt
         self.step_info["K_sp"] = K_sp
+        self.step_info["K_diff"] = K_diff
+        self.step_info["sp_crit"] = sp_crit
 
         # We have to create a new SPL in case
         # K is different...
+
         self.spl = StreamPowerEroder(
-            self, K_sp=K_sp, m_sp=self.m_sp, n_sp=self.n_sp
+            self, K_sp=K_sp, m_sp=self.m_sp, n_sp=self.n_sp, 
+            threshold_sp=sp_crit
         )
+        if K_diff > 0:
+            self.difflin = LinearDiffuser(
+                grid=self,
+                linear_diffusivity=K_diff,
+                method="simple",
+                deposit=False
+            )
 
         z_old = self.at_node["topographic__elevation"].copy()
-        self.at_node["topographic__elevation"][self.core_nodes] += U*dt
+        self.at_node["topographic__elevation"][self.core_nodes] += Uarray[self.core_nodes]*dt
         self.fa.run_one_step() # update flow routing
+ 
         self.spl.run_one_step(dt=dt) # erode landscape
+        if K_diff > 0:
+            print("hi there")
+            # save the river elevations, re-set them after running diffusion step
+            river_mask = K_sp*self.at_node["drainage_area"]**self.m_sp*self.at_node["topographic__steepest_slope"]**self.n_sp > sp_crit
+            pre_diff_river_z = self.at_node["topographic__elevation"][river_mask].copy()    
+            self.difflin.run_one_step(dt=dt)
+            self.at_node["topographic__elevation"][river_mask]= pre_diff_river_z.copy()   
         
         exhum = (U*dt - (self.at_node["topographic__elevation"] - z_old)) / dt 
         self.at_node["exhumation_rate"] = exhum
@@ -308,7 +318,7 @@ class CosmoLEM(RasterModelGrid):
         logger.info(
             f"Evolved landscape for one step:\n"
             f"\t{dt=}\n"
-            f"\t{U=}\n"
+            f"\t{np.mean(Uarray[self.core_nodes])=}\n"
             f"\t{K_sp=}\n"
             f"\tn_sp={self.n_sp}\n"
             f"\tm_sp={self.m_sp}\n"
@@ -352,7 +362,7 @@ class CosmoLEM(RasterModelGrid):
         
         self._cache.save_file(
             filekey=self.cachekey,
-            array=self.at_node[field_name]
+            data=self.at_node[field_name]
         )
         logger.info(
             f"Saved cache file {self.cachekey} in {get_cachedir()} at runtime {self.step_info['T_total']}"
@@ -563,8 +573,11 @@ class CosmoLEM(RasterModelGrid):
         self, 
         T_total : float | None = None,
         U_step : float | None = None,
-        K_step : float | None = None,
-        dt_step : float | None = None
+        K_sp_step : float | None = None,
+        K_diff_step: float|None = None,
+        sp_crit_step: float|None = None,
+        dt_step : float | None = None,
+        
     ):
         """
         Update the cachekey, i.e. the name of the file that is to be loaded from
@@ -586,22 +599,27 @@ class CosmoLEM(RasterModelGrid):
         # Use info in step_info or the directly supplied values
         t_use = T_total if T_total is not None else self.step_info['T_total']
         u_use = U_step if U_step is not None else self.step_info["U"]
-        k_use = K_step if K_step is not None else self.step_info["K_sp"]
+        if u_use is not None: u_use = np.round(u_use, 6)
+        k_sp_use = K_sp_step if K_sp_step is not None else self.step_info["K_sp"]
+        k_diff_use = K_diff_step if K_diff_step is not None else self.step_info["K_diff"]
+        sp_crit_use = sp_crit_step if sp_crit_step is not None else self.step_info["sp_crit"]
         dt_use = dt_step if dt_step is not None else self.step_info["dt"]        
             
-        cache_components = [
-            f"dim{self.shape[0]}{self.shape[1]}",
-            f"T{t_use}",
-            f"dt{dt_use}",
-            f"dx{self.dx}",
-            f"U{u_use}",
-            f"K_sp{k_use}",
-            f"n_sp{self.n_sp}",
-            f"m_sp{self.m_sp}",
-            f"outlet{self.outlet_position}",
-            f"key{self.identifier}"
-        ]
-        self.cachekey = "_".join(cache_components) + ".hdf5"  
+        cache_components = {
+            # "key": self.identifier,
+            "shape": (self.shape[0], self.shape[1]),
+            "n_sp": _safe_float(self.n_sp),
+            "m_sp": _safe_float(self.m_sp),
+            "outlet": self.outlet_position,
+            "dx": _safe_float(self.dx),
+            "T": _safe_float(t_use),
+            "dt": _safe_float(dt_use),
+            "U": _safe_float(u_use),
+            "K_sp": _safe_float(k_sp_use),
+            "K_diff": _safe_float(k_diff_use),
+            "sp_crit": _safe_float(sp_crit_use)
+        }
+        self.cachekey = cache_components
         
         logger.info(f"Updated cachekey to {self.cachekey} at runtime {self.step_info['T_total']}")
     
@@ -985,13 +1003,5 @@ class CosmoLEM(RasterModelGrid):
         else:
             raise Exception("Method keyword not valid!")        
         
-    
-def _is_numeric(value):
-    if type(value) == np.ndarray: return False 
-    try:
-        float(value)
-        return True
-    except:
-        return False
 
 

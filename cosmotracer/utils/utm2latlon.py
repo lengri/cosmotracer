@@ -1,6 +1,6 @@
-import pandas as pd 
-import os
+
 import numpy as np
+import pandas as pd
 import utm
 
 _UTM_ZONES_WGS84 = pd.DataFrame({
@@ -9,7 +9,7 @@ _UTM_ZONES_WGS84 = pd.DataFrame({
     "EPSG": list(range(32601, 32661)) + list(range(32701, 32761))
 })
 
-def convert_EPSG_to_UTM_zone(epsg):
+def _convert_EPSG_to_UTM_zone(epsg):
 
     id = np.where(_UTM_ZONES_WGS84["EPSG"]==epsg)[0]
     
@@ -18,15 +18,25 @@ def convert_EPSG_to_UTM_zone(epsg):
     
     zone = _UTM_ZONES_WGS84["ZoneNumber"].iloc[id].item()
     hem = _UTM_ZONES_WGS84["Hemisphere"].iloc[id].item()
-    
+
     return (zone, hem)
+
+def convert_latlon_to_xy(
+    lat : np.ndarray,
+    lon : np.ndarray,
+    epsg : int
+):
+    zn, hem = _convert_EPSG_to_UTM_zone(epsg)
+    is_northern = True if hem == "N" else False
+    x, y, zn, zl = utm.from_latlon(lat, lon, force_northern=is_northern)
+    return (x, y, zn, zl)
 
 def convert_xy_to_latlon(
     x : np.ndarray,
     y : np.ndarray,
     epsg : int
 ):
-    zn, hem = convert_EPSG_to_UTM_zone(epsg)
+    zn, hem = _convert_EPSG_to_UTM_zone(epsg)
     is_northern = True if hem == "N" else False
     
     lat, lon = utm.to_latlon(x, y, zn, northern=is_northern)
@@ -35,6 +45,6 @@ def convert_xy_to_latlon(
     
     
 if __name__ == "__main__":
-    out = convert_EPSG_to_UTM_zone(32611)
+    out = _convert_EPSG_to_UTM_zone(32611)
     print(out)
     

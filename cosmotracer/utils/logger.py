@@ -1,5 +1,6 @@
 import logging
 
+
 def start_logging(
     level=logging.INFO,
     fmt="%(asctime)s|%(filename)s|%(lineno)d|%(levelname)s: %(message)s",

@@ -1,6 +1,7 @@
 import numpy as np
 import scipy as sp
 
+
 def calculate_segmented_ksn(
     id_segments,
     chi_segments,

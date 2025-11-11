@@ -1,12 +1,13 @@
-import h5py
 import os
-import numpy as np
+import time
+from datetime import datetime, timedelta
 
-from .synthetic import CosmoLEM
+import h5py
+import numpy as np
 from landlab.components import ChiFinder
 
-import time
-from datetime import timedelta, datetime
+from .synthetic import CosmoLEM
+
 
 class ModelStartException(Exception):
     pass
