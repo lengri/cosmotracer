@@ -182,7 +182,14 @@ class CosmoLEM(RasterModelGrid):
         self.tracked_nodes = None
         self.tracked_exhumation = None
         self.tracked_z = None
-        self.tracked_transient_concentration = None
+        
+        # track concentrations produced by different pathways separately
+        setattr(self, "tracked_transient_concentration_sp", None)
+        setattr(self, "tracked_transient_concentration_seth", None)
+        setattr(self, "tracked_transient_concentration_th", None)
+        setattr(self, "tracked_transient_concentration_totmu", None)
+        setattr(self, "tracked_transient_concentration_nmu", None)
+        setattr(self, "tracked_transient_concentration_pmu", None)
         
         logger.info(
             "Successfully initialised CosmoLEM instance"
@@ -276,7 +283,7 @@ class CosmoLEM(RasterModelGrid):
             Uarray[self.core_nodes] = U[self.core_nodes] # keep boundaries at 0 uplift rate.
         else: # treat U as a float!
             Uarray[self.core_nodes] = U
-        
+
         self.step_info["dt"] = dt
         self.step_info["U"] = np.mean(Uarray[self.core_nodes])
         self.step_info['T_total'] += dt
@@ -291,6 +298,7 @@ class CosmoLEM(RasterModelGrid):
             self, K_sp=K_sp, m_sp=self.m_sp, n_sp=self.n_sp, 
             threshold_sp=sp_crit
         )
+
         if K_diff > 0:
             self.difflin = LinearDiffuser(
                 grid=self,
@@ -302,10 +310,10 @@ class CosmoLEM(RasterModelGrid):
         z_old = self.at_node["topographic__elevation"].copy()
         self.at_node["topographic__elevation"][self.core_nodes] += Uarray[self.core_nodes]*dt
         self.fa.run_one_step() # update flow routing
- 
-        self.spl.run_one_step(dt=dt) # erode landscape
+        self.spl.run_one_step(dt=float(dt)) # erode landscape
+
         if K_diff > 0:
-            print("hi there")
+
             # save the river elevations, re-set them after running diffusion step
             river_mask = K_sp*self.at_node["drainage_area"]**self.m_sp*self.at_node["topographic__steepest_slope"]**self.n_sp > sp_crit
             pre_diff_river_z = self.at_node["topographic__elevation"][river_mask].copy()    
@@ -374,6 +382,8 @@ class CosmoLEM(RasterModelGrid):
         T_total : float | None = None,
         U : float | None = None,
         K_sp : float | None = None,
+        K_diff: float|None = None,
+        sp_crit: float|None = None,
         dt : float | None = None,
         field_name : str = "topographic__elevation"
     ):
@@ -414,8 +424,10 @@ class CosmoLEM(RasterModelGrid):
             self._update_cachekey(
                 T_total=T_total, 
                 U_step=U, 
-                K_step=K_sp,
-                dt_step=dt
+                K_sp_step=K_sp,
+                dt_step=dt,
+                K_diff_step=K_diff,
+                sp_crit=sp_crit
             )
             logger.info(f"Updated cachekey to {self.cachekey}")
             cached_field = self._cache.load_file(
@@ -575,7 +587,7 @@ class CosmoLEM(RasterModelGrid):
         U_step : float | None = None,
         K_sp_step : float | None = None,
         K_diff_step: float|None = None,
-        sp_crit_step: float|None = None,
+        sp_crit: float|None = None,
         dt_step : float | None = None,
         
     ):
@@ -602,7 +614,7 @@ class CosmoLEM(RasterModelGrid):
         if u_use is not None: u_use = np.round(u_use, 6)
         k_sp_use = K_sp_step if K_sp_step is not None else self.step_info["K_sp"]
         k_diff_use = K_diff_step if K_diff_step is not None else self.step_info["K_diff"]
-        sp_crit_use = sp_crit_step if sp_crit_step is not None else self.step_info["sp_crit"]
+        sp_crit_use = sp_crit if sp_crit is not None else self.step_info["sp_crit"]
         dt_use = dt_step if dt_step is not None else self.step_info["dt"]        
             
         cache_components = {
@@ -849,15 +861,23 @@ class CosmoLEM(RasterModelGrid):
         self.at_node[f"tcn__scaling_{production_pathway}"][self.tracked_nodes] = surface_production/production_rate_SLHL
         
         # Create a new tracked_transient_concentrations stack, if this is the first step
-        if self.tracked_transient_concentration is None:
-            self.tracked_transient_concentration = tracked_concs.reshape(1,len(self.tracked_nodes))
+        if getattr(self, f"tracked_transient_concentration_{production_pathway}") is None:
+            setattr(
+                self, 
+                f"tracked_transient_concentration_{production_pathway}", 
+                tracked_concs.reshape(1,len(self.tracked_nodes))
+            )
         # Or add it to the existing stack
         else:
-            self.tracked_transient_concentration = np.vstack(
-                (
-                    self.tracked_transient_concentration,
-                    tracked_concs
-                    
+            setattr(
+                self,
+                f"tracked_transient_concentration_{production_pathway}",
+                np.vstack(
+                    (
+                        getattr(self, f"tracked_transient_concentration_{production_pathway}"),
+                        tracked_concs
+                        
+                    )
                 )
             )
     

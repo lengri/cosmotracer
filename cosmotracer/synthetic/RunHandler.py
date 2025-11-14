@@ -32,6 +32,8 @@ class RunHandler:
         K_sp: float,
         n_sp: float,
         m_sp: float,
+        sp_crit: float,
+        K_diff: float,
         outlet: str,
         identifier: int|str = 0,
         xy_of_lower_left: tuple = (500_000, 0.)
@@ -52,10 +54,14 @@ class RunHandler:
             T_total=T_spinup,
             U=U,
             K_sp=K_sp,
-            dt=dt
+            dt=dt,
+            K_diff=K_diff,
+            sp_crit=sp_crit
         )
         
-        self.K_spinup = K_sp
+        self.K_sp_spinup = K_sp
+        self.K_diff_spinup = K_diff
+        self.sp_crit = sp_crit
         self.U_spinup = U
         self.dt_spinup = dt
         self.T_spinup = T_spinup
@@ -68,7 +74,9 @@ class RunHandler:
         U: np.ndarray|float,
         K_sp: np.ndarray|float,
         dt: float,
-        P_SLHL: float,
+        P_SLHL_dict: dict,
+        att_dict: dict,
+        dint_dict: dict,
         halflife: float,
         nuclide: str,
         savedir: str,
@@ -105,12 +113,14 @@ class RunHandler:
         self.T_max = T_max
         self.Uarray = U
         self.Karray = K_sp
-        self.P = P_SLHL
+        self.Pdict = P_SLHL_dict
         self.t12 = halflife
         self.nuc = nuclide
+        self.attdict = att_dict
+        self.dintdict = dint_dict
         
         # Create hdf5 key
-        hkey = f"model_U{self.U_spinup}_K{self.K_spinup}_n{self.model.n_sp}_m{self.model.m_sp}_dt{dt}_Tmax{T_max}.hdf5"
+        hkey = f"model_U{self.U_spinup}_Ksp{self.K_sp_spinup}_Kdiff{self.K_diff_spinup}_n{self.model.n_sp}_m{self.model.m_sp}_dt{dt}_Tmax{T_max}.h5"
         self.filepath = os.path.join(savedir, hkey)
         
         self.i_start = 0 # start at the first array entry, this value will be changed if we load a model.
@@ -128,7 +138,9 @@ class RunHandler:
                 f.attrs["n_sp"] = self.model.n_sp 
                 f.attrs["m_sp"] = self.model.m_sp
                 f.attrs["U_spinup"] = self.U_spinup 
-                f.attrs["K_spinup"] = self.K_spinup
+                f.attrs["K_sp_spinup"] = self.K_sp_spinup
+                f.attrs["K_diff_spinup"] = self.K_diff_spinup
+                f.attrs["sp_crit"] = self.sp_crit
                 f.attrs["dt_spinup"] = self.dt_spinup
                 f.attrs["T_spinup"] = self.T_spinup
                 f.attrs["dx"] = self.model.xy_spacing
@@ -136,7 +148,7 @@ class RunHandler:
                 f.attrs["system_datetime_creation"] = str(datetime.now())
                 f.attrs["system_datetime_laststep"] = str(datetime.now())
                 f.attrs["model_U_laststep"] = 0.
-                f.attrs["model_K_laststep"] = 0.
+                f.attrs["model_Ksp_laststep"] = 0.
                 f.attrs["model_T_total"] = 0.
                 
                 f.create_dataset(
@@ -185,8 +197,9 @@ class RunHandler:
                 )
                 
                 # These datasets are tracked throughout the entire model run
-                self._create_grid_dataset(f, "model_trans_conc", n_steps)
-                self._create_grid_dataset(f, "model_tcn_scaling", n_steps)
+                for pathway in self.Pdict.keys(): 
+                    self._create_grid_dataset(f, f"model_trans_conc_{pathway}", n_steps)
+                    self._create_grid_dataset(f, f"model_tcn_scaling_{pathway}", n_steps)
                 self._create_grid_dataset(f, "model_exhum", n_steps)
                 self._create_grid_dataset(f, "model_tracked_z", n_steps)
         
@@ -226,7 +239,12 @@ class RunHandler:
                     # need to set tracked_exhumation, tracked_z, tracked_transient_concentrations
                     self.model.tracked_exhumation = f["model_exhum"][:,:]
                     self.model.tracked_z = f["model_tracked_z"][:,:]
-                    self.model.tracked_transient_concentration = f["model_trans_conc"][:,:]
+                    for pathway in self.Pdict.keys():
+                        setattr(
+                            self.model, 
+                            f"tracked_transient_concentration_{pathway}",
+                            f[f"model_trans_conc_{pathway}"][:,:]
+                        )
                     
                     # also set the elevation, make sure that these two are synced
                     self.model._z = f["model_z"][:]
@@ -235,7 +253,7 @@ class RunHandler:
                     # No need to load the past U values.
                     
                     # assert that the supplied values in Uarray and Karray
-                    u_equal = f.attrs["model_K_laststep"] != self.Karray[self.i_start]
+                    u_equal = f.attrs["model_Ksp_laststep"] != self.Karray[self.i_start]
                     if u_equal:
                         raise ModelStartException(f"Determined U starting point {self.Uarray[self.i_start]=} does not equal {f.attrs['model_U_laststep']}")
                     
@@ -270,25 +288,30 @@ class RunHandler:
             current_time = time.time()
             
             print(
-                f"Running model with parameters Ksp={k}, U={u}. "
+                f"Running model with parameters Ksp={k}, U={u}, Kdiff={self.K_diff_spinup}. "
                 f"Runtime: {self.model.step_info["T_total"]}/{self.T_max}, "
                 f"zmax: {self.model.at_node["topographic__elevation"].max():.2f} "
                 f"Runtime: {str(timedelta(seconds=int(current_time-start_time)))}",
                 end="\r"
             )
-            
-            self.model.run_one_spl_step(
+
+            self.model.run_one_step(
                 U=u,
                 K_sp=k,
-                dt=self.dt
+                dt=self.dt,
+                sp_crit=self.sp_crit,
+                K_diff=self.K_diff_spinup
             )
-
-            self.model.calculate_TCN_transient_concentration(
-                depth_integration=4.,
-                nuclide=self.nuc,
-                production_rate_SLHL=self.P,
-                halflife=self.t12
-            )
+            
+            # for each pathway, calculate the transient concentration!
+            for pathway in self.Pdict.keys():
+                self.model.calculate_TCN_transient_concentration(
+                    depth_integration=self.dintdict[pathway],
+                    nuclide=self.nuc,
+                    production_rate_SLHL=self.Pdict[pathway],
+                    halflife=self.t12,
+                    production_pathway=pathway
+                )
         
             self._save_step_to_hdf5(
                 K_step=k,
@@ -301,19 +324,26 @@ class RunHandler:
         with h5py.File(self.filepath, "a") as f:
             
             f.attrs["system_datetime_laststep"] = str(datetime.now())
-            f.attrs["model_K_laststep"] = K_step 
+            f.attrs["model_Ksp_laststep"] = K_step 
             f.attrs["model_U_laststep"] = U_step
             f.attrs["model_T_total"] = T_step
             
             f["model_t"].resize(f["model_t"].shape[0]+1, axis=0)
             f["model_t"][-1] = self.model.step_info["T_total"]
 
-            f["model_trans_conc"].resize(f["model_trans_conc"].shape[0]+1, axis=0)
-            f["model_trans_conc"][-1,:] = self.model.tracked_transient_concentration[-1,:]
-
-            f["model_tcn_scaling"].resize(f["model_tcn_scaling"].shape[0]+1, axis=0)
-            f["model_tcn_scaling"][-1,:] = self.model.at_node["tcn__scaling_sp"][self.model.tracked_nodes]
-
+            for pathway in self.Pdict.keys():
+                
+                # save concentrations
+                f[f"model_trans_conc_{pathway}"].resize(f[f"model_trans_conc_{pathway}"].shape[0]+1, axis=0)
+                f[f"model_trans_conc_{pathway}"][-1,:] = getattr(
+                    self.model,
+                    f"tracked_transient_concentration_{pathway}"
+                )[-1,:]
+                
+                # save scaling factors
+                f[f"model_tcn_scaling_{pathway}"].resize(f[f"model_tcn_scaling_{pathway}"].shape[0]+1, axis=0)
+                f[f"model_tcn_scaling_{pathway}"][-1,:] = self.model.at_node[f"tcn__scaling_{pathway}"][self.model.tracked_nodes]
+            
             f["model_z"][:] = self.model.at_node["topographic__elevation"] # always save all elevations to restart model
             
             # quickly calculate chi values:
