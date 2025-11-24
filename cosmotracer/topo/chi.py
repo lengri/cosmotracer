@@ -1,12 +1,18 @@
 from scipy.optimize import minimize
 import numpy as np
-from landlab import RasterModelGrid
-from landlab.components import ChannelProfiler
 
 from cosmotracer.utils.wrappers import (
-    _extend_channel_segments_to_outlet, 
     map_node_values_upstream
 )
+
+def _curvature(x, neighbor_nodes):
+    curv = np.zeros(x.shape)
+    for i in range(0, len(x)):
+        curv[i] = len(neighbor_nodes[i])*x[i]
+        for n in neighbor_nodes[i]:
+            curv[i] -= x[n]
+    
+    return curv
 
 def _chi_objective_function(
     ksn,
@@ -15,11 +21,8 @@ def _chi_objective_function(
     neighbor_nodes: dict,
     alpha: float = 1,
 ):
-    curv = np.zeros(ksn.shape)
-    for i in range(0, len(ksn)):
-        curv[i] = len(neighbor_nodes[i])*ksn[i]
-        for n in neighbor_nodes[i]:
-            curv[i] -= ksn[n]
+    
+    curv = _curvature(ksn, neighbor_nodes)
             
     z -= z[0]
     
@@ -155,7 +158,7 @@ def ksn_chiinv(
     min_channel_threshold: float = 1e6
 ):
 
-    grid.add_zeros("channel__inv_ksn")
+    grid.add_zeros("channel__inv_ksn", clobber=True)
     grid.at_node["channel__inv_ksn"][grid.at_node["drainage_area"]>=min_channel_threshold] = -1
     
     A, ksninit, ztrue, neighbor_dict, inv_ids = build_inversion_equation(
@@ -166,7 +169,7 @@ def ksn_chiinv(
     
     out = minimize(
         fun=_chi_objective_function, 
-        x0=ksninit, 
+        x0=np.ones(len(ksninit)), 
         args=(A, ztrue, neighbor_dict, alpha),
         bounds=[(0, None) for _ in ksninit],
         **minimize_args
@@ -183,7 +186,11 @@ def ksn_chiinv(
         key = [key for key in outdict.keys() if key[0]==outlet][0]
         grid.at_node["channel__inv_ksn"][outlet] = grid.at_node["channel__inv_ksn"][outdict[key]["ids"][1]]
     
-    return grid
+    # calculate solution norm and residual
+    res_norm = np.sum((np.matmul(A, out.x)-ztrue)**2)
+    sol_norm = np.sum((_curvature(out.x, neighbor_dict)-ksninit)**2)
+    
+    return (grid, (res_norm, sol_norm))
 
         
     
