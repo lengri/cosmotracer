@@ -2,6 +2,7 @@ import logging
 import time
 
 import numpy as np
+from scipy.optimize import minimize_scalar
 
 logger = logging.getLogger(__name__)
 from cosmotracer.tcn import calculate_xyz_scaling_factors
@@ -14,7 +15,54 @@ class DepthIntegrationError(Exception):
     """
     pass
 
+
 def calculate_depth_interval_concentration(
+    z0,
+    z1,
+    exhumation_rate,
+    production_rate=1.0,
+    attenuation_length=160.0,      # g/cm²
+    bulk_density=2.7,              # g/cm³
+    halflife=np.inf,
+    initial_concentration=0.0
+):
+    """
+    Numerically stable calculation of concentration as a sample is exhumed
+    from depth z0 to z1 at constant exhumation_rate.
+
+    Returns concentration at z1.
+    """
+    # ensure arrays for vectorized ops
+    z0 = np.asarray(z0)
+    z1 = np.asarray(z1)
+    e = np.asarray(exhumation_rate)
+    p0 = production_rate
+
+    # units: match the original units used in your code
+    rho = bulk_density * 1e2**3   # g/m^3  (1 g/cm^3 = 1e6 g/m^3)
+    att = attenuation_length * 1e2**2  # g/m^2 (1 g/cm^2 = 1e4 g/m^2)
+    mu = rho / att
+
+    lam = 0.0 if np.isinf(halflife) else np.log(2.0) / halflife
+
+    # total travel time
+    t1 = (z0 - z1) / e
+
+    # decayed initial concentration
+    C0 = initial_concentration * np.exp(-lam * t1)
+
+    denom = lam + mu * e
+
+    # numerically stable evaluation:
+    # C = C0 + (p0/denom) * ( exp(-mu*z1) - exp(-(lam/e + mu)*z0 + (lam/e)*z1) )
+    # This form avoids exp(+large) entirely; both exponent arguments are negative for positive parameters.
+    term1 = np.exp(-mu * z1)
+    term2 = np.exp(-(lam / e + mu) * z0 + (lam / e) * z1)
+
+    C = C0 + (p0 / denom) * (term1 - term2)
+    return C
+
+def _calculate_depth_interval_concentration(
     z0: float|np.ndarray, # column depth in m
     z1: float|np.ndarray, # column depth, we assume that z1 < z0 (the sample moves towards the surface)
     exhumation_rate: float|np.ndarray, # this value is greater than zero
@@ -77,6 +125,57 @@ def calculate_depth_interval_concentration(
     
     return concentration
 
+def calculate_steady_state_erosion_multiple_pathways(
+    concentration: float,
+    bulk_density: float = 2.7,
+    production_rates: np.ndarray = np.array([1.]),
+    attenuation_lengths: np.ndarray = np.array([160.]),
+    halflife: float = np.inf,
+    max_erosion_rate: float = 1.,
+    solver_tolerace: float = 1e-7
+):
+    """
+    This function calculates the steady state erosion rate inferred from a concentration
+    assumed to have contributions from n production components, such as spallation, muon etc.
+    
+    If more than 1 component is supplied, the equation is solved numerically. For 1 component only,
+    an analytical solution is derived using calculate_steady_state_erosion(). 
+    """
+    
+    # check: if we only have one prod rate, pass to calculate_steady_state_erosion() 
+    if len(production_rates) != len(attenuation_lengths):
+        raise Exception("production_rates does not match shape of attenuation_lengths")
+    if len(production_rates) == 1:
+        e = calculate_steady_state_erosion(
+            concentration=concentration,
+            bulk_density=bulk_density,
+            production_rate=production_rates[0],
+            attenuation_length=attenuation_lengths[0],
+            halflife=halflife
+        )
+        return e 
+    else:
+        # we have to use scipy optimize to find a solution here!
+        def _objfun(e, cin, rho, prods, atts, lambd):
+            c = np.sum(prods/(lambd+rho*1e2*e/atts))
+            return (c - cin)**2
+        
+        out = minimize_scalar(
+            fun=_objfun,
+            args=(
+                concentration,
+                bulk_density,
+                production_rates,
+                attenuation_lengths,
+                np.log(2)/halflife
+            ),
+            bounds=(0, max_erosion_rate),
+            method="Bounded",
+            options={"xatol": solver_tolerace}
+        )
+        
+        return out.x
+    
 def calculate_steady_state_erosion(
     concentration : np.ndarray|float,
     bulk_density : np.ndarray|float = 2.7,
@@ -84,7 +183,8 @@ def calculate_steady_state_erosion(
     attenuation_length : np.ndarray|float = 160.,
     halflife : np.ndarray|float = np.inf
 ):
-    e = (attenuation_length / bulk_density) * (production_rate / concentration - np.log(2)/halflife) / 1e2
+    """Returns erosion rate in m/yr"""
+    e = (attenuation_length / bulk_density / 1e2) * (production_rate / concentration - np.log(2)/halflife)
     return e
 
 def calculate_steady_state_concentration(
@@ -101,6 +201,7 @@ def calculate_steady_state_concentration(
     -----------
         exhumation_rate : float
             Erosion rate in m/yr
+        etc
     """
     lambd = np.log(2) / halflife
     conc = production_rate / (lambd + bulk_density*1e2*exhumation_rate/attenuation_length)
