@@ -1,5 +1,4 @@
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 
 import geopandas as gpd
@@ -9,8 +8,9 @@ import h5py
 import numpy as np
 import platformdirs
 import ujson
-import pickle
 import sqlite3
+import joblib
+import io
 
 # For the watershed export
 from landlab import RasterModelGrid
@@ -279,6 +279,11 @@ class SQLiteScalingCache:
         nuclide_key: str = "He"
     ):
         
+        """
+        An updated Scaling Cache replacing the naive JSON approach that was
+        prone to corrupting the file.
+        """
+        
         self.cache_allowed = allow_cache
         self.round_level = round_level
         self.conn = None
@@ -302,10 +307,31 @@ class SQLiteScalingCache:
                 print(f"Error connecting to SQLite database: {e}. Disabling caching.")
                 self.cache_allowed = False
                 
-    def __del__(self):
-        # 2. Ensure the connection is closed when the object is destroyed
-        if self.conn:
-            self.conn.close()
+    def __enter__(self):
+        """Called when entering the 'with' block."""
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        """
+        Called when exiting the 'with' block. 
+        Guarantees commit or rollback, even on exceptions/interrupts.
+        """
+        if self.conn and self.cache_allowed:
+            try:
+                if exc_type is None:
+                    # Success: Commit all pending changes to the database
+                    self.conn.commit()
+                else:
+                    # Failure (Error or KeyboardInterrupt): Roll back incomplete changes
+                    print(f"\nCache transaction failure ({exc_type.__name__}). Rolling back.")
+                    self.conn.rollback()
+            except sqlite3.Error as e:
+                print(f"FATAL: Database finalization error: {e}")
+                
+            finally:
+                self.conn.close()
+    
+        return False # Do not suppress the exception
 
     def _get_cachekey(self, lat: float, lon: float, elev: float) -> str:
         """Generates the unique, rounded string key for the cache."""
@@ -334,40 +360,37 @@ class SQLiteScalingCache:
             if row is None:
                 return None # Not in cache
             
+            buffer = io.BytesIO(row[0])
             # Deserialize the bytes back into a NumPy array
-            return pickle.loads(row[0])
+            return joblib.load(buffer)
             
         except sqlite3.Error as e:
             # Handle potential read errors gracefully
             print(f"Error reading from cache: {e}")
             return None
 
-    def set_cache_value(self, lat: float, lon: float, elev: float, array_value: np.ndarray):
-        """
-        Stores a calculated scaling factor array into the cache.
-        """
+    def set_cache_value(
+        self, lat: float, lon: float, elev: float, array_value: list
+    ):
         if not self.cache_allowed:
             return None
         
         key = self._get_cachekey(lat, lon, elev)
         
         try:
-            # Serialize the NumPy array into bytes (BLOB)
-            serialized_value = pickle.dumps(array_value)
+            array = np.array(array_value, dtype=np.float64)
+            buffer = io.BytesIO()
+            joblib.dump(array, buffer, compress=3)
+            serialized_value = buffer.getvalue()
             
-            # UPSERT (UPDATE or INSERT) the key/value pair.
-            # ON CONFLICT ensures atomicity and robustness.
+            # INSERT OR REPLACE the key/value pair. NO COMMIT HERE!
             self.conn.execute(
                 "INSERT INTO scaling_cache (key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (key, serialized_value)
             )
-            
-            # Commit immediately to disk for safety against interrupts!
-            self.conn.commit()
+            # self.conn.commit() <--- REMOVED! This is the key performance change.
             
         except sqlite3.Error as e:
-            # Handle potential write errors gracefully
-            print(f"Error writing to cache: {e}. Attempting rollback.")
-            # Rollback to ensure no partial write state
-            self.conn.rollback()
+            print(f"Warning: Error preparing cache write for key {key}: {e}")
+            # We don't need to rollback here; it's handled by __exit__ if it fails.
