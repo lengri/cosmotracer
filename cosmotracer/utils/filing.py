@@ -116,9 +116,7 @@ class ModelCache():
         with h5py.File(self.cache_filepath, "r") as f: # treat the actual h5 as the primary group
             group = f
             for key, value in filekey.items():
-                
                 groupkey = key + f"{value}"
-                
                 if groupkey in group:
                     group = group[groupkey]
                 else:
@@ -186,7 +184,8 @@ class ScalingCache():
         self,
         allow_cache : bool = True,
         round_level : int = 1,
-        scaling_param_key : str = "He"
+        nuclide_key : str = "He",
+        
     ):
 
         # Global options for this Cache instance
@@ -199,7 +198,7 @@ class ScalingCache():
             self.cache_dir.mkdir(parents=True, exist_ok=True)
 
             # make the json file if it doesn't exist
-            fname = f"{scaling_param_key}_roundlvl{self.round_level}.json"
+            fname = f"{nuclide_key}_roundlvl{self.round_level}.json"
             self.filepath = self.cache_dir / fname
             
             if not os.path.isfile(self.filepath):

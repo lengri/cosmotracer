@@ -36,7 +36,7 @@ def calculate_xyz_scaling_factors(
     cache = ScalingCache(
         allow_cache=allow_cache,
         round_level=round_level,
-        scaling_param_key=nuclide
+        nuclide_key=nuclide
     )
     cache.load_cache()
 
