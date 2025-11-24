@@ -310,7 +310,8 @@ class RunHandler:
                     nuclide=self.nuc,
                     production_rate_SLHL=self.Pdict[pathway],
                     halflife=self.t12,
-                    production_pathway=pathway
+                    production_pathway=pathway,
+                    attenuation_length=self.attdict[pathway]
                 )
         
             self._save_step_to_hdf5(
