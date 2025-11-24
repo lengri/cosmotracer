@@ -21,7 +21,7 @@ from cosmotracer.tcn.accumulation import (
     calculate_transient_concentration,
 )
 from cosmotracer.topo import calculate_segmented_ksn
-from cosmotracer.utils.filing import ModelCache, get_cachedir
+from cosmotracer.utils.filing import ModelCache, SQLiteScalingCache, get_cachedir
 
 def _safe_float(x):
     return float(x) if x is not None else None

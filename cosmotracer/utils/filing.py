@@ -9,6 +9,8 @@ import h5py
 import numpy as np
 import platformdirs
 import ujson
+import pickle
+import sqlite3
 
 # For the watershed export
 from landlab import RasterModelGrid
@@ -267,3 +269,105 @@ class ScalingCache():
         
         self._set_cachekey(lat, lon, elev)
         self.cache[self.cachekey] = value
+        
+class SQLiteScalingCache:
+    
+    def __init__(
+        self, 
+        round_level: int = 1,
+        allow_cache: bool = True,
+        nuclide_key: str = "He"
+    ):
+        
+        self.cache_allowed = allow_cache
+        self.round_level = round_level
+        self.conn = None
+
+        if self.cache_allowed:
+            # 1. Open the connection and create the table if allowed
+            self.cache_dir : Path = platformdirs.user_cache_path(PACKAGE_NAME)
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            db_name = f"{nuclide_key}_roundlvl{self.round_level}.db" 
+            try:
+                self.conn = sqlite3.connect(self.cache_dir / db_name)
+                # Ensure the table structure exists
+                self.conn.execute('''
+                    CREATE TABLE IF NOT EXISTS scaling_cache (
+                        key TEXT PRIMARY KEY,
+                        value BLOB
+                    )
+                ''')
+                self.conn.commit()
+            except sqlite3.Error as e:
+                print(f"Error connecting to SQLite database: {e}. Disabling caching.")
+                self.cache_allowed = False
+                
+    def __del__(self):
+        # 2. Ensure the connection is closed when the object is destroyed
+        if self.conn:
+            self.conn.close()
+
+    def _get_cachekey(self, lat: float, lon: float, elev: float) -> str:
+        """Generates the unique, rounded string key for the cache."""
+        # Use the tuple string as the key
+        return str((
+            round(lat, self.round_level), 
+            round(lon, self.round_level), 
+            round(elev, self.round_level)
+        ))
+
+    def get_cache_value(self, lat: float, lon: float, elev: float):
+        """
+        Retrieves a scaling factor array from the cache.
+        Returns the array if found, None otherwise.
+        """
+        if not self.cache_allowed:
+            return None
+        
+        key = self._get_cachekey(lat, lon, elev)
+        
+        try:
+            # Select the BLOB (bytes) from the database
+            cursor = self.conn.execute("SELECT value FROM scaling_cache WHERE key = ?", (key,))
+            row = cursor.fetchone()
+            
+            if row is None:
+                return None # Not in cache
+            
+            # Deserialize the bytes back into a NumPy array
+            return pickle.loads(row[0])
+            
+        except sqlite3.Error as e:
+            # Handle potential read errors gracefully
+            print(f"Error reading from cache: {e}")
+            return None
+
+    def set_cache_value(self, lat: float, lon: float, elev: float, array_value: np.ndarray):
+        """
+        Stores a calculated scaling factor array into the cache.
+        """
+        if not self.cache_allowed:
+            return None
+        
+        key = self._get_cachekey(lat, lon, elev)
+        
+        try:
+            # Serialize the NumPy array into bytes (BLOB)
+            serialized_value = pickle.dumps(array_value)
+            
+            # UPSERT (UPDATE or INSERT) the key/value pair.
+            # ON CONFLICT ensures atomicity and robustness.
+            self.conn.execute(
+                "INSERT INTO scaling_cache (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, serialized_value)
+            )
+            
+            # Commit immediately to disk for safety against interrupts!
+            self.conn.commit()
+            
+        except sqlite3.Error as e:
+            # Handle potential write errors gracefully
+            print(f"Error writing to cache: {e}. Attempting rollback.")
+            # Rollback to ensure no partial write state
+            self.conn.rollback()
