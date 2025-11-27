@@ -47,6 +47,11 @@ def calculate_depth_interval_concentration(
 
     # total travel time
     t1 = (z0 - z1) / e
+    
+    # if the nuclide is stable, we need a special treatment to avoid nans
+    if lam == 0.0:
+        C = initial_concentration + (p0/(mu*e))*(np.exp(-mu*z1)-np.exp(-mu*z0))
+        return C
 
     # decayed initial concentration
     C0 = initial_concentration * np.exp(-lam * t1)
@@ -76,6 +81,8 @@ def _calculate_depth_interval_concentration(
     Calculate the concentration of a sample as it is exhumed towards the surface from z0 to z1
     at rate exhumation_rate. Assumes that the surface production rate at a single point does not
     vary with time.
+    
+    LEGACY. TODO: REMOVE IN FUTURE VERSION
     
     Parameters:
     -----------
@@ -417,8 +424,27 @@ def calculate_transient_concentration(
     scaling_factors = np.vstack([scaling_factors[0,:], scaling_factors])
     scaling_time_end = time.time()
     
+    # to get even more accurate, calculate the inherited concentration that samples
+    # might have as they arrive at their respective max modelled depths.
+    # Use the depth interval function for this and assume constant exh and
+    # surface production
+    Psurf_init = prod*scaling_factors[-1,:] # upside down!!
+    exh_init = exh[-1,:]
+    zeta_init = coldep[-1,:]
+    
+    conc_out = calculate_depth_interval_concentration(
+        z0=np.full_like(zeta_init, np.inf),
+        z1=zeta_init,
+        exhumation_rate=exh_init,
+        production_rate=Psurf_init,
+        attenuation_length=attenuation_length,
+        bulk_density=bulk_density,
+        halflife=halflife
+    )
+    print(conc_out)
+    
     # Next up: start from the bottom / largest depths and integrate the concentration.
-    conc_out = c0
+    # conc_out = c0
     
     # Since density and att have units of grams and cm, we convert the coldep into cm as well.
     coldep *= 100
@@ -473,7 +499,12 @@ if __name__ == "__main__":
      northing = np.linspace(3924450.0, 3924450.0+50000, exhum.shape[1])
      easting = np.linspace(344730.0, 344730.0+50000, exhum.shape[1])
      
-     calculate_transient_concentration(
+     cinit = calculate_depth_interval_concentration(
+         z0=np.inf, z1=0, exhumation_rate=1e-3,
+     )
+     print(cinit)
+     
+     ctrans, prod = calculate_transient_concentration(
          exhumation_rates=exhum,
          dt=1000,
          surface_elevations=z,
@@ -482,26 +513,14 @@ if __name__ == "__main__":
          eastings=easting,
          epsg=32611,
          allow_cache=True,
-         depth_integration=10.
+         depth_integration=1.
      )
-     
-     sf = calculate_xyz_scaling_factors(
-         x=easting,
-         y=northing,
-         z=z[-1,:],
-         epsg=32611,
-         nuclide="He",
-         allow_cache=True
-     )[:,0]
-     
-     ss_conc = calculate_steady_state_concentration(
+
+     css = calculate_steady_state_concentration(
          exhumation_rate=exhum[0,:],
-         production_rate=116.*sf
+         production_rate=prod
      )
-     print(ss_conc)
-     
-     
-     print(sf)
+     print(cinit, ctrans, css)
                 
             
             
