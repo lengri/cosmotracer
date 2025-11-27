@@ -441,7 +441,6 @@ def calculate_transient_concentration(
         bulk_density=bulk_density,
         halflife=halflife
     )
-    print(conc_out)
     
     # Next up: start from the bottom / largest depths and integrate the concentration.
     # conc_out = c0
