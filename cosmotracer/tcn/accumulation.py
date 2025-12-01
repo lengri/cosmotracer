@@ -440,7 +440,7 @@ def calculate_transient_concentration(
         attenuation_length=attenuation_length,
         bulk_density=bulk_density,
         halflife=halflife
-    )
+    ) + c0 # just add inheritance, its a bit dirty but better than nothing
     
     # Next up: start from the bottom / largest depths and integrate the concentration.
     # conc_out = c0

@@ -647,8 +647,9 @@ class CosmoLEM(RasterModelGrid):
     
     def calculate_TCN_xyz_scaling(
         self, 
-        nuclide : str = "He", 
-        opt_args : dict = {}
+        nuclide : str = "He",
+        opt_args : dict = {},
+        
     ):
         """
         Calculate elevation, latitude, and longitude scaling factors. 

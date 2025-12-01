@@ -93,10 +93,16 @@ class RunHandler:
         k_is_array = hasattr(K_sp, '__iter__')
         
         if (u_is_array and k_is_array) and (len(U) != len(K_sp)):
-            raise ModelStartException(f"Incompatible U, K_sp formats with {len(U)=} and {len(K_sp)=}")
+            raise ModelStartException(
+                f"Incompatible U, K_sp formats with "
+                f"{len(U)=} and {len(K_sp)=}"
+            )
         # if both are not iterable, abort
         if not u_is_array and not k_is_array:
-            raise ModelStartException("Cannot determine model runtime if U, K_sp are not array-like!")
+            raise ModelStartException(
+                "Cannot determine model runtime if "
+                "U, K_sp are not array-like!"
+            )
         
         # cast both to np.ndarray if necessary
         if not u_is_array:
@@ -120,10 +126,16 @@ class RunHandler:
         self.dintdict = dint_dict
         
         # Create hdf5 key
-        hkey = f"model_U{self.U_spinup}_Ksp{self.K_sp_spinup}_Kdiff{self.K_diff_spinup}_n{self.model.n_sp}_m{self.model.m_sp}_dt{dt}_Tmax{T_max}.h5"
+        hkey = (
+            f"model_U{self.U_spinup}_Ksp{self.K_sp_spinup}"
+            f"_Kdiff{self.K_diff_spinup}_n{self.model.n_sp}"
+            f"_m{self.model.m_sp}_dt{dt}_Tmax{T_max}.h5"
+        )
         self.filepath = os.path.join(savedir, hkey)
         
-        self.i_start = 0 # start at the first array entry, this value will be changed if we load a model.
+        # start at the first array entry, 
+        # this value will be changed if we load a model.
+        self.i_start = 0 
         self.model_is_complete = False 
         
         if not os.path.exists(self.filepath):
@@ -151,33 +163,32 @@ class RunHandler:
                 f.attrs["model_Ksp_laststep"] = 0.
                 f.attrs["model_T_total"] = 0.
                 
-                f.create_dataset(
-                    "model_t", 
-                    (0,), 
-                    
-                    maxshape=(n_steps,), 
-                    dtype="float64"
-                )
-                f.create_dataset(
-                    "model_U", 
-                    (n_steps,),
-                    data=self.Uarray, 
-                    maxshape=(n_steps,), 
-                    dtype="float64"
-                )
-                f.create_dataset(
-                    "model_K", 
-                    (n_steps,),
-                    data=self.Karray, 
-                    maxshape=(n_steps,), 
-                    dtype="float64"
-                )
+                self._create_1d_dataset(f, "model_t", n_steps)
+                self._create_1d_dataset(f, "model_U", n_steps, data=self.Uarray)
+                self._create_1d_dataset(f, "model_K", n_steps, data=self.Karray)
+                for pathway in self.Pdict.keys(): 
+                    self._create_1d_dataset(f, f"model_Peff_{pathway}", n_steps)
                 
+                # these are ids over entire model domain, 
+                # should filter out to core_nodes?
                 f.create_dataset(
                     "model_tracked_node_id", 
                     data=self.model.tracked_nodes, 
                     maxshape=self.model.tracked_nodes.shape, 
-                    dtype="float64"
+                    dtype="int64"
+                )
+                # Tracked nodes transformed to core_id arrays (the 2d arrays in this h5)
+                id_tracked2core = []
+                for id in self.model.tracked_nodes:
+                    for i, idc in enumerate(self.model.core_nodes):
+                        if id==idc:
+                            id_tracked2core.append(i)
+                            
+                f.create_dataset(
+                    "model_tracked_node_id_corearray", 
+                    data=id_tracked2core, 
+                    maxshape=(len(id_tracked2core),), 
+                    dtype="int64"
                 )
 
                 # We need to track all elevation values, 
@@ -198,10 +209,10 @@ class RunHandler:
                 
                 # These datasets are tracked throughout the entire model run
                 for pathway in self.Pdict.keys(): 
-                    self._create_grid_dataset(f, f"model_trans_conc_{pathway}", n_steps)
-                    self._create_grid_dataset(f, f"model_tcn_scaling_{pathway}", n_steps)
-                self._create_grid_dataset(f, "model_exhum", n_steps)
-                self._create_grid_dataset(f, "model_tracked_z", n_steps)
+                    self._create_2d_dataset(f, f"model_trans_conc_{pathway}", n_steps)
+                    self._create_2d_dataset(f, f"model_tcn_scaling_{pathway}", n_steps)
+                self._create_2d_dataset(f, "model_exhum", n_steps)
+                self._create_2d_dataset(f, "model_tracked_z", n_steps)
         
         else:
             # look if the file has information in it!
@@ -219,7 +230,8 @@ class RunHandler:
                     # also print a warning in case tmax is not compatible with dx
                     if t_max % dt != 0:
                         print(
-                            f"WARNING: {t_max=} found in file {self.filepath} not compatible with {dt=}."
+                            f"WARNING: {t_max=} found in file {self.filepath} "
+                            f"not compatible with {dt=}. "
                             "Unable to load past model run from file."
                         )
                     
@@ -234,7 +246,8 @@ class RunHandler:
                 if load_model and not self.model_is_complete:
                     
                     # Define T_start!
-                    self.i_start = len(model_t) # start at the index one after the last computed index (no -1 needed!)
+                    # start at the index one after the last computed index (no -1 needed!)
+                    self.i_start = len(model_t) 
 
                     # need to set tracked_exhumation, tracked_z, tracked_transient_concentrations
                     self.model.tracked_exhumation = f["model_exhum"][:,:]
@@ -255,13 +268,43 @@ class RunHandler:
                     # assert that the supplied values in Uarray and Karray
                     u_equal = f.attrs["model_Ksp_laststep"] != self.Karray[self.i_start]
                     if u_equal:
-                        raise ModelStartException(f"Determined U starting point {self.Uarray[self.i_start]=} does not equal {f.attrs['model_U_laststep']}")
+                        raise ModelStartException(
+                            f"Determined U starting point {self.Uarray[self.i_start]=} " 
+                            f"does not equal {f.attrs['model_U_laststep']}"
+                        )
                     
                     k_equal = f.attrs["model_U_laststep"] != self.Uarray[self.i_start]
                     if k_equal:
-                        raise ModelStartException(f"Determined K starting point {self.Karray[self.i_start]=} does not equal {f.attrs['model_K_laststep']}")
+                        raise ModelStartException(
+                            f"Determined K starting point {self.Karray[self.i_start]=} "
+                            f"does not equal {f.attrs['model_K_laststep']}"
+                        )
 
-    def _create_grid_dataset(
+    def _create_1d_dataset(
+        self,
+        f: h5py.File,
+        dataset_name,
+        n_steps,
+        data = None
+    ):
+        if data is None:
+            f.create_dataset(
+                dataset_name, 
+                (0,), 
+                maxshape=(n_steps,), 
+                dtype="float64"
+            )
+        else:
+            f
+            f.create_dataset(
+                dataset_name, 
+                (n_steps,),
+                data=data, 
+                maxshape=(n_steps,), 
+                dtype="float64"
+            )
+            
+    def _create_2d_dataset(
         self,
         f: h5py.File,
         dataset_name,
@@ -303,8 +346,14 @@ class RunHandler:
                 K_diff=self.K_diff_spinup
             )
             
+            # calculate scaling factors for current elevations (for all core nodes!)
+            self.model.calculate_TCN_xyz_scaling(
+                nuclide=self.nuc
+            )
+            
             # for each pathway, calculate the transient concentration!
             for pathway in self.Pdict.keys():
+            # we-re calculate some scaling factors, but that should be fine.
                 self.model.calculate_TCN_transient_concentration(
                     depth_integration=self.dintdict[pathway],
                     nuclide=self.nuc,
@@ -332,20 +381,30 @@ class RunHandler:
             f["model_t"].resize(f["model_t"].shape[0]+1, axis=0)
             f["model_t"][-1] = self.model.step_info["T_total"]
 
-            for pathway in self.Pdict.keys():
+            for pathway, pslhl in self.Pdict.items():
                 
                 # save concentrations
-                f[f"model_trans_conc_{pathway}"].resize(f[f"model_trans_conc_{pathway}"].shape[0]+1, axis=0)
+                f[f"model_trans_conc_{pathway}"] \
+                    .resize(f[f"model_trans_conc_{pathway}"].shape[0]+1, axis=0)
                 f[f"model_trans_conc_{pathway}"][-1,:] = getattr(
                     self.model,
                     f"tracked_transient_concentration_{pathway}"
                 )[-1,:]
                 
                 # save scaling factors
-                f[f"model_tcn_scaling_{pathway}"].resize(f[f"model_tcn_scaling_{pathway}"].shape[0]+1, axis=0)
-                f[f"model_tcn_scaling_{pathway}"][-1,:] = self.model.at_node[f"tcn__scaling_{pathway}"][self.model.tracked_nodes]
+                f[f"model_tcn_scaling_{pathway}"] \
+                    .resize(f[f"model_tcn_scaling_{pathway}"].shape[0]+1, axis=0)
+                f[f"model_tcn_scaling_{pathway}"][-1,:] = \
+                    self.model.at_node[f"tcn__scaling_{pathway}"][self.model.tracked_nodes]
+                    
+                # Save an effective production rate
+                f[f"model_Peff_{pathway}"] \
+                    .resize(f[f"model_Peff_{pathway}"].shape[0]+1, axis=0)
+                f[f"model_Peff_{pathway}"][-1] = \
+                    np.mean(self.model.at_node[f"tcn__scaling_{pathway}"][self.model.core_nodes])*pslhl
             
-            f["model_z"][:] = self.model.at_node["topographic__elevation"] # always save all elevations to restart model
+            # always save all elevations to restart model
+            f["model_z"][:] = self.model.at_node["topographic__elevation"] 
             
             # quickly calculate chi values:
             chi = ChiFinder(
