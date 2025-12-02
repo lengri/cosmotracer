@@ -770,6 +770,7 @@ class CosmoLEM(RasterModelGrid):
             # NOTE: The stacking is such that the newest step is always at position [n] 
             # of the 2d array. This matches the order expected by 
             # calculate_transient_concentration.
+            
             self.tracked_exhumation = np.vstack(
                 (
                     self.tracked_exhumation,

@@ -111,7 +111,18 @@ class RunHandler:
             K_sp = np.ones(len(U))*K_sp
 
         # set tracked nodes, or use the default (all core nodes)
+        # these ids are in reference to total (flattened) grid size!
         if tracked_nodes is not None: self.model.tracked_nodes = tracked_nodes
+        # quickly convert them to the ids corresponding to only core_nodes too:
+        # Tracked nodes transformed to core_id arrays (the 2d arrays in this h5)
+        id_tracked2core = []
+        for id in self.model.tracked_nodes:
+            for i, idc in enumerate(self.model.core_nodes):
+                if id==idc:
+                    id_tracked2core.append(i)
+        
+        self.tracked_nodes_coreref = id_tracked2core
+        
         n_steps = len(U)
         T_max = n_steps*dt
         
@@ -177,12 +188,6 @@ class RunHandler:
                     maxshape=self.model.tracked_nodes.shape, 
                     dtype="int64"
                 )
-                # Tracked nodes transformed to core_id arrays (the 2d arrays in this h5)
-                id_tracked2core = []
-                for id in self.model.tracked_nodes:
-                    for i, idc in enumerate(self.model.core_nodes):
-                        if id==idc:
-                            id_tracked2core.append(i)
                             
                 f.create_dataset(
                     "model_tracked_node_id_corearray", 
@@ -199,6 +204,13 @@ class RunHandler:
                     maxshape=(1, self.model.number_of_nodes), 
                     dtype="float64"
                 )
+                f.create_dataset(
+                    "model_exhum", 
+                    (0, len(self.model.core_nodes)), 
+                    maxshape=(n_steps, len(self.model.core_nodes)), 
+                    dtype="float64"
+                )
+                
                 # Also track chi to display upstream distance of nodes.
                 f.create_dataset(
                     "model_chi",
@@ -211,7 +223,6 @@ class RunHandler:
                 for pathway in self.Pdict.keys(): 
                     self._create_2d_dataset(f, f"model_trans_conc_{pathway}", n_steps)
                     self._create_2d_dataset(f, f"model_tcn_scaling_{pathway}", n_steps)
-                self._create_2d_dataset(f, "model_exhum", n_steps)
                 self._create_2d_dataset(f, "model_tracked_z", n_steps)
         
         else:
@@ -250,7 +261,9 @@ class RunHandler:
                     self.i_start = len(model_t) 
 
                     # need to set tracked_exhumation, tracked_z, tracked_transient_concentrations
-                    self.model.tracked_exhumation = f["model_exhum"][:,:]
+                    # model_exhum contains all exhumation rates of core nodes, need to filter to 
+                    # tracked nodes only!
+                    self.model.tracked_exhumation = f["model_exhum"][:,self.tracked_nodes_coreref]
                     self.model.tracked_z = f["model_tracked_z"][:,:]
                     for pathway in self.Pdict.keys():
                         setattr(
@@ -420,5 +433,5 @@ class RunHandler:
             f["model_tracked_z"].resize(f["model_tracked_z"].shape[0]+1, axis=0)
             f["model_tracked_z"][-1,:] = self.model.at_node["topographic__elevation"][self.model.tracked_nodes]
             f["model_exhum"].resize(f["model_exhum"].shape[0]+1, axis=0)
-            f["model_exhum"][-1,:] = self.model.at_node["exhumation_rate"][self.model.tracked_nodes]
+            f["model_exhum"][-1,:] = self.model.at_node["exhumation_rate"][self.model.core_nodes]
         
