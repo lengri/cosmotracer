@@ -4,9 +4,10 @@ from datetime import datetime, timedelta
 
 import h5py
 import numpy as np
-from landlab.components import ChiFinder
+from landlab.components import ChiFinder, FlowAccumulator
 
 from .synthetic import CosmoLEM
+from cosmotracer.tcn import calculate_steady_state_erosion_multiple_pathways
 
 
 class ModelStartException(Exception):
@@ -36,28 +37,32 @@ class RunHandler:
         K_diff: float,
         outlet: str,
         identifier: int|str = 0,
-        xy_of_lower_left: tuple = (500_000, 0.)
+        xy_of_lower_left: tuple = (500_000, 0.),
+        z_init: None|np.ndarray = None,
+        allowed_spinup: float = 0.0
     ):
 
         self.model = CosmoLEM(
+            z_init=z_init,
             n_sp=n_sp,
             m_sp=m_sp,
             shape=shape,
             xy_spacing=dx,
             xy_of_lower_left=xy_of_lower_left,
             identifier=identifier,
-            allow_cache=True
+            allow_cache=True            
         )
         self.model.set_outlet_position(outlet)
 
-        self.model.load_grid(
-            T_total=T_spinup,
-            U=U,
-            K_sp=K_sp,
-            dt=dt,
-            K_diff=K_diff,
-            sp_crit=sp_crit
-        )
+        if z_init is None:
+            self.model.load_grid(
+                T_total=T_spinup,
+                U=U,
+                K_sp=K_sp,
+                dt=dt,
+                K_diff=K_diff,
+                sp_crit=sp_crit
+            )
         
         self.K_sp_spinup = K_sp
         self.K_diff_spinup = K_diff
@@ -65,6 +70,7 @@ class RunHandler:
         self.U_spinup = U
         self.dt_spinup = dt
         self.T_spinup = T_spinup
+        self.allowed_spinup = allowed_spinup
         
         # by default, track all core nodes...
         self.model.tracked_nodes = self.model.core_nodes
@@ -358,15 +364,16 @@ class RunHandler:
                 sp_crit=self.sp_crit,
                 K_diff=self.K_diff_spinup
             )
-            
+
             # calculate scaling factors for current elevations (for all core nodes!)
             self.model.calculate_TCN_xyz_scaling(
                 nuclide=self.nuc
             )
-            
+
             # for each pathway, calculate the transient concentration!
             for pathway in self.Pdict.keys():
             # we-re calculate some scaling factors, but that should be fine.
+
                 self.model.calculate_TCN_transient_concentration(
                     depth_integration=self.dintdict[pathway],
                     nuclide=self.nuc,
@@ -375,7 +382,7 @@ class RunHandler:
                     production_pathway=pathway,
                     attenuation_length=self.attdict[pathway]
                 )
-        
+
             self._save_step_to_hdf5(
                 K_step=k,
                 U_step=u,
@@ -435,3 +442,85 @@ class RunHandler:
             f["model_exhum"].resize(f["model_exhum"].shape[0]+1, axis=0)
             f["model_exhum"][-1,:] = self.model.at_node["exhumation_rate"][self.model.core_nodes]
         
+def parse_RunHandler_output(
+    wd,
+    fname,
+    P_dict={"sp": 4.09, "totmu": 0.024, "nmu": 0.027},
+    att_dict={"sp": 160, "totmu": 4320, "nmu": 1510},
+    halflife=1.5e6,
+    dx=100,
+    shape=(100, 100)
+):
+    with h5py.File(os.path.join(wd, fname), "r") as f:
+    
+        #
+        # Load data from model run
+        #
+        id = f["model_tracked_node_id"][:]
+        id_core = f["model_tracked_node_id_corearray"][:]
+        
+        t = f["model_t"][:]
+        exhum = f["model_exhum"][:]
+        conc_sp = f["model_trans_conc_sp"][:]
+        scaling_sp = f["model_tcn_scaling_sp"][:]
+        conc_totmu = f["model_trans_conc_totmu"][:]
+        scaling_totmu = f["model_tcn_scaling_totmu"][:]
+        conc_nmu = f["model_trans_conc_nmu"][:]
+        scaling_nmu = f["model_tcn_scaling_nmu"][:]
+        
+        conc = conc_sp + conc_totmu + conc_nmu
+        z = f["model_z"][:]
+        
+        p_eff_sp = f["model_Peff_sp"][:]
+        p_eff_totmu = f["model_Peff_totmu"][:]
+        p_eff_nmu = f["model_Peff_nmu"][:]
+        
+    # calculate chi values for all nodes...
+    model = CosmoLEM(shape=shape, xy_spacing=dx)
+    model.set_outlet_position("SW")
+    model.at_node["topographic__elevation"] = z
+    fa = FlowAccumulator(model, flow_director="FlowDirectorD8")
+    fa.run_one_step()
+    chif = ChiFinder(model, min_drainage_area=0)
+    chif.calculate_chi()
+    imchi = model.at_node["channel__chi_index"].reshape(model.shape)
+    
+    weigthed_mean_concs = np.sum(exhum[:,id_core]*conc, axis=1)/np.sum(exhum[:,id_core], axis=1)
+    mean_true_exhum = np.mean(exhum, axis=1)
+    mean_sp_scaling = np.mean(scaling_sp, axis=1)
+    mean_totmu_scaling = np.mean(scaling_totmu, axis=1)
+    mean_nmu_scaling = np.mean(scaling_nmu, axis=1)
+    
+    # calculate apparent exhum assuming SS exhumation history.
+    mean_apparent_exhum = np.zeros(len(t))
+    for i, c in enumerate(weigthed_mean_concs):
+        iprod = np.array(list(P_dict.values()))*np.array([mean_sp_scaling[i], mean_totmu_scaling[i], mean_nmu_scaling[i]])
+        iprod = np.array([p_eff_sp[i], p_eff_totmu[i], p_eff_nmu[i]])
+        mean_apparent_exhum[i] = calculate_steady_state_erosion_multiple_pathways(
+            concentration=c,
+            production_rates=iprod,
+            attenuation_lengths=np.array(list(att_dict.values())),
+            halflife=halflife,
+            solver_tolerace=1e-10
+        )
+    
+    out = {
+        # Calculated means
+        "mean_true_exhum": mean_true_exhum,
+        "mean_sp_scaling": mean_sp_scaling,
+        "mean_totmu_scaling": mean_totmu_scaling,
+        "mean_nmu_scaling": mean_nmu_scaling,
+        "mean_apparent_exhum": mean_apparent_exhum,
+        "chi_image": imchi,
+        "P_eff_sp": p_eff_sp,
+        "P_eff_totmu": p_eff_totmu,
+        "P_eff_nmu": p_eff_nmu,
+        "t": t,
+        "z": z,
+        # Raw outputs
+        "core_node_exhum": exhum,
+        "id_tracked": id,
+        "id_tracked_core": id_core
+    }
+    
+    return out

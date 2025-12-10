@@ -26,7 +26,6 @@ from cosmotracer.utils.wrappers import (
 
 logger = logging.getLogger(__name__)
 
-
 class Basin(CosmoLEM):
     
     def __init__(

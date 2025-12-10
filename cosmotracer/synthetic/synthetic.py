@@ -962,9 +962,9 @@ class CosmoLEM(RasterModelGrid):
             return None # end here
 
         # Manually add the steepness index field here  
-        print("hi there")  
+
         self.add_zeros("channel__steepness_index", clobber=True)
-        print("hi there 2")
+
         # Get the channel nodes
         if cp_data_structure == {}:
             cp = ChannelProfiler(

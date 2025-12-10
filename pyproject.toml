@@ -36,7 +36,14 @@ package-dir = {"" = "."} # This explicitly says 'look for packages in this direc
 packages = [
   "cosmotracer", 
   "cosmotracer.basin", 
-  "cosmotracer.tcn"
+  "cosmotracer.corrections",
+  "cosmotracer.geometry",
+  "cosmotracer.grainmove",
+  "cosmotracer.statistics",
+  "cosmotracer.synthetic",
+  "cosmotracer.tcn",
+  "cosmotracer.topo",
+  "cosmotracer.utils"
 ]
 
 # ruff configuration down here
