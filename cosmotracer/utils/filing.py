@@ -122,8 +122,8 @@ class ModelCache():
                 if groupkey in group:
                     group = group[groupkey]
                 else:
-                    return False
-            return True
+                    return (False, groupkey) # groupkey is the one that failed
+            return (True, None)
         
     def load_file(
         self,
@@ -137,10 +137,13 @@ class ModelCache():
         if not self.cache_allowed:
             return None
 
-        if not self._dataset_exists(filekey=filekey):
+        exist_ok = self._dataset_exists(filekey=filekey)
+        
+        if not exist_ok[0]:
             raise CacheNotFoundError(
                 f"Could not find dataset with key {filekey} "
-                f"in {self.cache_filepath}"
+                f"in {self.cache_filepath}. Search failed at"
+                f"key {exist_ok[1]}."
             )
         
         with h5py.File(self.cache_filepath, "r") as f: # treat the actual h5 as the primary group
