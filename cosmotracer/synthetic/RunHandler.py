@@ -17,7 +17,7 @@ class ModelStartException(Exception):
 class RunHandler:
     
     """
-    Handles saving each time step of aa model run to hdf5, can
+    Handles saving each time step of a model run to hdf5, can
     also restart a model at the appropriate time and fill-in 
     saved exhumations etc. For accurate transient CTN concentration 
     calculations.
@@ -263,8 +263,8 @@ class RunHandler:
                 if load_model and not self.model_is_complete:
                     
                     # Define T_start!
-                    # start at the index one after the last computed index (no -1 needed!)
-                    self.i_start = len(model_t) 
+                    # start at the index one after the last computed index
+                    self.i_start = len(model_t) - 1
 
                     # need to set tracked_exhumation, tracked_z, tracked_transient_concentrations
                     # model_exhum contains all exhumation rates of core nodes, need to filter to 
@@ -275,7 +275,7 @@ class RunHandler:
                         setattr(
                             self.model, 
                             f"tracked_transient_concentration_{pathway}",
-                            f[f"model_trans_conc_{pathway}"][:,:]
+                            f[f'model_trans_conc_{pathway}'][:,:]
                         )
                     
                     # also set the elevation, make sure that these two are synced
@@ -285,18 +285,18 @@ class RunHandler:
                     # No need to load the past U values.
                     
                     # assert that the supplied values in Uarray and Karray
-                    u_equal = f.attrs["model_Ksp_laststep"] != self.Karray[self.i_start]
+                    u_equal = f.attrs["model_U_laststep"] != self.Uarray[self.i_start]
                     if u_equal:
                         raise ModelStartException(
                             f"Determined U starting point {self.Uarray[self.i_start]=} " 
                             f"does not equal {f.attrs['model_U_laststep']}"
                         )
                     
-                    k_equal = f.attrs["model_U_laststep"] != self.Uarray[self.i_start]
+                    k_equal = f.attrs["model_Ksp_laststep"] != self.Karray[self.i_start]
                     if k_equal:
                         raise ModelStartException(
                             f"Determined K starting point {self.Karray[self.i_start]=} "
-                            f"does not equal {f.attrs['model_K_laststep']}"
+                            f"does not equal {f.attrs['model_Ksp_laststep']}"
                         )
 
     def _create_1d_dataset(
@@ -449,10 +449,13 @@ def parse_RunHandler_output(
     att_dict={"sp": 160, "totmu": 4320, "nmu": 1510},
     halflife=1.5e6,
     dx=100,
-    shape=(100, 100)
+    shape=(100, 100),
+    use_every_i_tracked_node=1
 ):
-    with h5py.File(os.path.join(wd, fname), "r") as f:
     
+    ith = use_every_i_tracked_node
+    with h5py.File(os.path.join(wd, fname), "r") as f:
+        
         #
         # Load data from model run
         #
@@ -475,9 +478,15 @@ def parse_RunHandler_output(
         p_eff_totmu = f["model_Peff_totmu"][:]
         p_eff_nmu = f["model_Peff_nmu"][:]
         
-    # calculate chi values for all nodes...
-    model = CosmoLEM(shape=shape, xy_spacing=dx)
-    model.set_outlet_position("SW")
+        U = f["model_U"][:]
+        K = f["model_K"][:]
+        
+        # calculate chi values for all nodes...
+        model = CosmoLEM(shape=shape, xy_spacing=dx, epsg=f.attrs["epsg"])
+        model.set_outlet_position(f.attrs["outlet"])
+        
+    # filter: only use every ith tracked node (shows sample size effects!)
+    
     model.at_node["topographic__elevation"] = z
     fa = FlowAccumulator(model, flow_director="FlowDirectorD8")
     fa.run_one_step()
@@ -485,7 +494,11 @@ def parse_RunHandler_output(
     chif.calculate_chi()
     imchi = model.at_node["channel__chi_index"].reshape(model.shape)
     
-    weigthed_mean_concs = np.sum(exhum[:,id_core]*conc, axis=1)/np.sum(exhum[:,id_core], axis=1)
+    weighted_mean_concs = np.sum(exhum[:,id_core[::ith]]*conc[:,::ith], axis=1)/np.sum(exhum[:,id_core[::ith]], axis=1)
+    mean_true_exhum_tracked = np.mean(exhum[:,id_core[::ith]], axis=1)
+    
+    # This is an approximation of the basin-avg scaling factors, use all data for this, not every ith.
+    # TODO: Does this have a big effect?
     mean_true_exhum = np.mean(exhum, axis=1)
     mean_sp_scaling = np.mean(scaling_sp, axis=1)
     mean_totmu_scaling = np.mean(scaling_totmu, axis=1)
@@ -493,7 +506,7 @@ def parse_RunHandler_output(
     
     # calculate apparent exhum assuming SS exhumation history.
     mean_apparent_exhum = np.zeros(len(t))
-    for i, c in enumerate(weigthed_mean_concs):
+    for i, c in enumerate(weighted_mean_concs):
         iprod = np.array(list(P_dict.values()))*np.array([mean_sp_scaling[i], mean_totmu_scaling[i], mean_nmu_scaling[i]])
         iprod = np.array([p_eff_sp[i], p_eff_totmu[i], p_eff_nmu[i]])
         mean_apparent_exhum[i] = calculate_steady_state_erosion_multiple_pathways(
@@ -501,26 +514,47 @@ def parse_RunHandler_output(
             production_rates=iprod,
             attenuation_lengths=np.array(list(att_dict.values())),
             halflife=halflife,
-            solver_tolerace=1e-10
+            solver_tolerance=1e-16
         )
+        
+    # calculate the exhum error using all core nodes / only tracked nodes
+    exhum_error_all = 100 * (mean_apparent_exhum - mean_true_exhum) / mean_true_exhum
+    exhum_error_tracked = 100 * (mean_apparent_exhum - mean_true_exhum_tracked) / mean_true_exhum_tracked
     
     out = {
+        
         # Calculated means
         "mean_true_exhum": mean_true_exhum,
         "mean_sp_scaling": mean_sp_scaling,
         "mean_totmu_scaling": mean_totmu_scaling,
         "mean_nmu_scaling": mean_nmu_scaling,
         "mean_apparent_exhum": mean_apparent_exhum,
+        "mean_weighted_concs": weighted_mean_concs,
+        
+        # Errors
+        "exhum_error_all": exhum_error_all,
+        "exhum_error_tracked": exhum_error_tracked,
+        
+        # Some helper data...
         "chi_image": imchi,
         "P_eff_sp": p_eff_sp,
         "P_eff_totmu": p_eff_totmu,
         "P_eff_nmu": p_eff_nmu,
         "t": t,
         "z": z,
+        "U": U,
+        "K": K,
+        
         # Raw outputs
         "core_node_exhum": exhum,
-        "id_tracked": id,
-        "id_tracked_core": id_core
+        "core_node_conc": conc[:,::ith],
+        "core_node_conc_sp": conc_sp[:,::ith],
+        "core_node_scaling_sp": scaling_sp[:,::ith],
+        "core_node_scaling_nmu": scaling_nmu[:,::ith],
+        "core_node_scaling_totmu": scaling_totmu[:,::ith],
+        "id_tracked": id[::ith],
+        "id_tracked_core": id_core[::ith],
+        "model": model
     }
     
     return out

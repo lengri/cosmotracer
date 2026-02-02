@@ -10,7 +10,7 @@ authors = [
 ]
 description = "A library for performing detrital cosmogenic nuclide studies."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
   'numpy<2.0',
   'scipy',
@@ -22,7 +22,8 @@ dependencies = [
   'pyLSD@git+https://github.com/lengri/pyLSD',
   'shapely',
   'geopandas',
-  'h5py'
+  'h5py',
+  'ujson'
 ]
 
 [tool.setuptools]
@@ -46,7 +47,7 @@ packages = [
   "cosmotracer.utils"
 ]
 
-# ruff configuration down here
+# ruff configuration down here (maybe remove again?)
 [tool.ruff]
 lint.select = ["E", "F", "I", "B", "ANN"]
 exclude = [
