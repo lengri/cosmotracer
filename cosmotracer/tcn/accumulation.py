@@ -139,7 +139,7 @@ def calculate_steady_state_erosion_multiple_pathways(
     attenuation_lengths: np.ndarray = np.array([160.]),
     halflife: float = np.inf,
     max_erosion_rate: float = 1.,
-    solver_tolerace: float = 1e-7
+    solver_tolerance: float = 1e-7
 ):
     """
     This function calculates the steady state erosion rate inferred from a concentration
@@ -178,7 +178,7 @@ def calculate_steady_state_erosion_multiple_pathways(
             ),
             bounds=(0, max_erosion_rate),
             method="Bounded",
-            options={"xatol": solver_tolerace}
+            options={"xatol": solver_tolerance}
         )
         
         return out.x
@@ -230,7 +230,8 @@ def calculate_transient_concentration(
     epsg : int|None = None,
     inheritance_concentration : np.ndarray|None = None,
     throw_integration_error : bool  = False,
-    allow_cache : bool = False
+    allow_cache : bool = False,
+    _easy_production: bool = False
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     This function approximates nuclide concentration of  m samples rising towards 
@@ -403,20 +404,23 @@ def calculate_transient_concentration(
     # print("Scaling factors")
     scaling_time_start = time.time()
     
-    # loop over each row in z and calculat the scaling factors
-    for i in range(0, z.shape[0]):
-        
-        out = calculate_xyz_scaling_factors(
-            x=eastings,
-            y=northings,
-            z=z[i,:],
-            epsg=epsg,
-            nuclide=nuclide,
-            verbose=False,
-            allow_cache=allow_cache
-        )
-        scaling_factors[i,:] = out[:,pathway2id[production_pathway]]
-        logger.debug(f"Calculated scaling factors for step {i} of {z.shape[0]}")
+    if _easy_production:
+        scaling_factors = np.ones(z.shape)
+    else:
+        # loop over each row in z and calculat the scaling factors
+        for i in range(0, z.shape[0]):
+            
+            out = calculate_xyz_scaling_factors(
+                x=eastings,
+                y=northings,
+                z=z[i,:],
+                epsg=epsg,
+                nuclide=nuclide,
+                verbose=False,
+                allow_cache=allow_cache
+            )
+            scaling_factors[i,:] = out[:,pathway2id[production_pathway]]
+            logger.debug(f"Calculated scaling factors for step {i} of {z.shape[0]}")
     
     logger.info("Successfully calculated scaling factors")
         
