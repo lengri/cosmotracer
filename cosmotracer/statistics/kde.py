@@ -104,6 +104,9 @@ class GaussianKDE:
     ):
         self.mu = mu 
         self.error = error 
+        
+        if weights is None:
+            weights = np.ones_like(mu)
         self.weights = (weights/np.sum(weights)) 
         
         # check if x has been defined. If not, construct it from 
