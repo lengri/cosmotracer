@@ -285,15 +285,16 @@ class RunHandler:
                     # No need to load the past U values.
                     
                     # assert that the supplied values in Uarray and Karray
+                    print(f.attrs["model_U_laststep"], self.Uarray[self.i_start])
                     u_equal = np.isclose(f.attrs["model_U_laststep"], self.Uarray[self.i_start])
-                    if u_equal:
+                    if not u_equal:
                         raise ModelStartException(
                             f"Determined U starting point {self.Uarray[self.i_start]=} " 
                             f"does not equal {f.attrs['model_U_laststep']}"
                         )
                     
                     k_equal = np.isclose(f.attrs["model_Ksp_laststep"], self.Karray[self.i_start])
-                    if k_equal:
+                    if not k_equal:
                         raise ModelStartException(
                             f"Determined K starting point {self.Karray[self.i_start]=} "
                             f"does not equal {f.attrs['model_Ksp_laststep']}"
