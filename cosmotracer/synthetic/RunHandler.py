@@ -130,7 +130,7 @@ class RunHandler:
         self.tracked_nodes_coreref = id_tracked2core
         
         n_steps = len(U)
-        T_max = n_steps*dt
+        T_max = (n_steps)*dt
         
         self.dt = dt
         self.T_max = T_max
@@ -285,14 +285,14 @@ class RunHandler:
                     # No need to load the past U values.
                     
                     # assert that the supplied values in Uarray and Karray
-                    u_equal = f.attrs["model_U_laststep"] != self.Uarray[self.i_start]
+                    u_equal = np.isclose(f.attrs["model_U_laststep"], self.Uarray[self.i_start])
                     if u_equal:
                         raise ModelStartException(
                             f"Determined U starting point {self.Uarray[self.i_start]=} " 
                             f"does not equal {f.attrs['model_U_laststep']}"
                         )
                     
-                    k_equal = f.attrs["model_Ksp_laststep"] != self.Karray[self.i_start]
+                    k_equal = np.isclose(f.attrs["model_Ksp_laststep"], self.Karray[self.i_start])
                     if k_equal:
                         raise ModelStartException(
                             f"Determined K starting point {self.Karray[self.i_start]=} "
@@ -392,6 +392,13 @@ class RunHandler:
     def _save_step_to_hdf5(self, K_step, U_step, T_step):
         
         with h5py.File(self.filepath, "a") as f:
+            
+            current_size = f["model_t"].shape[0]
+            max_size = f["model_t"].maxshape[0]
+            
+            if current_size >= max_size:
+                print(f"Warning: Cannot add step to hdf5, max size reached!")
+                return None
             
             f.attrs["system_datetime_laststep"] = str(datetime.now())
             f.attrs["model_Ksp_laststep"] = K_step 
