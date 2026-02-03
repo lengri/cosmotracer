@@ -231,6 +231,7 @@ def calculate_transient_concentration(
     inheritance_concentration : np.ndarray|None = None,
     throw_integration_error : bool  = False,
     allow_cache : bool = False,
+    depth_approximation: bool = False,
     _easy_production: bool = False
 ) -> tuple[np.ndarray, np.ndarray]:
     """
@@ -436,16 +437,18 @@ def calculate_transient_concentration(
     exh_init = exh[-1,:]
     zeta_init = coldep[-1,:]
     
-    conc_out = calculate_depth_interval_concentration(
-        z0=np.full_like(zeta_init, np.inf),
-        z1=zeta_init,
-        exhumation_rate=exh_init,
-        production_rate=Psurf_init,
-        attenuation_length=attenuation_length,
-        bulk_density=bulk_density,
-        halflife=halflife
-    ) + c0 # just add inheritance, its a bit dirty but better than nothing
-    
+    if depth_approximation:
+        conc_out = calculate_depth_interval_concentration(
+            z0=np.full_like(zeta_init, np.inf),
+            z1=zeta_init,
+            exhumation_rate=exh_init,
+            production_rate=Psurf_init,
+            attenuation_length=attenuation_length,
+            bulk_density=bulk_density,
+            halflife=halflife
+        ) + c0 # just add inheritance, its a bit dirty but better than nothing
+    else:
+        conc_out = c0
     # Next up: start from the bottom / largest depths and integrate the concentration.
     # conc_out = c0
     
