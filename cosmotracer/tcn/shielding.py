@@ -45,7 +45,9 @@ def calculate_exact_shielding(
         wth_node_mask = wth > q_cutoff
     
     # for each active pixel...
-    for current_id in open_node_ids:
+    for i, current_id in enumerate(open_node_ids):
+        
+        print(f"{i} / {len(open_node_ids)}", end="\r")
         
         elev_node_mask = z > z[current_id]
             
