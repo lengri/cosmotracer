@@ -7,4 +7,5 @@ from .accumulation import (
     calculate_transient_concentration,
     calculate_steady_state_erosion_multiple_pathways
 )
+from .shielding import calculate_exact_shielding
 

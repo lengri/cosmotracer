@@ -5,7 +5,8 @@ from cosmotracer.utils.wrappers import (
     map_node_values_upstream
 )
 
-def _curvature(x, neighbor_nodes):
+def _curvature(x, neighbor_nodes, chi_nodes):
+    # TODO: This needs to be in chi space
     curv = np.zeros(x.shape)
     for i in range(0, len(x)):
         curv[i] = len(neighbor_nodes[i])*x[i]
