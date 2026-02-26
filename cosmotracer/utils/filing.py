@@ -164,7 +164,7 @@ class ModelCache():
             return None
         
         # we have to check if the file exists in "w" mode, otherwise we will overwrite existing info!
-        if self._dataset_exists(filekey=filekey) and self.fail_on_overwrite:
+        if self._dataset_exists(filekey=filekey)[0] and self.fail_on_overwrite:
             raise CacheOverwriteError(
                 f"Saving dataset for current filekey "
                 f"would overwrite existing dataset in {self.cache_filepath}"
