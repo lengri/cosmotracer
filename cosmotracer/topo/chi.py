@@ -5,6 +5,8 @@ from cosmotracer.utils.wrappers import (
     map_node_values_upstream
 )
 
+from landlab import Component, RasterModelGrid
+
 def _curvature(x, neighbor_nodes, chi_nodes):
     # TODO: This needs to be in chi space
     curv = np.zeros(x.shape)
@@ -194,6 +196,97 @@ def ksn_chiinv(
     return (grid, (res_norm, sol_norm))
 
         
+class ChiQFinder(
+    Component
     
-    
+):
+    def __init__(
+        self,
+        grid: RasterModelGrid,
+        discharge_field: str = "drainage_area",
+        reference_concavity: float = 0.5,
+        reference_value: float = 1.,
+        use_area_threshold: bool = True,
+        min_drainage_area: float = 1e5,
+        min_discharge: float = 5e5,
+        clobber=False
+    ):
+        
+        super().__init__(grid)
+        
+        self._grid = grid 
+        
+        self._chi = self._grid.add_zeros(
+            "channel__chi_index", at="node", clobber=clobber
+        )
+        
+        if isinstance(self._grid, RasterModelGrid):
+            self._link_lengths = self._grid.length_of_d8
+        else:
+            raise NotImplementedError("ChiQ on non-regular grids is not implemented!")
+        
+        self._reftheta = reference_concavity
+        self._refA = reference_value
+        self._A_field = self._grid.at_node[discharge_field]
+        
+        # determine mask for channels
+        
+        upstr_order = self._grid.at_node["flow__upstream_node_order"]
+        
+        if use_area_threshold:
+            self._valid_upstream_order = upstr_order[
+                self._grid.at_node["drainage_area"][upstr_order] >= min_drainage_area
+            ]
+        else:
+            self._valid_upstream_order = upstr_order[
+                self._grid.at_node[discharge_field][upstr_order] >= min_discharge
+            ]
+            
+        self._mask = self._grid.ones(at="node", dtype=bool)
+        self._elev = self._grid.at_node["topographic__elevation"]
+        
+
+    def calculate_chiQ(self):
+        
+        receivers = self._grid.at_node["flow__receiver_node"]
+        
+        self._mask.fill(True)
+        self._chi.fill(0.0)
+        
+        reftheta = self._reftheta
+        a0 = self._refA
+        
+        valid_upstr_areas = self._A_field[self._valid_upstream_order]
+        
+        chi_integrand = (a0 / valid_upstr_areas) ** reftheta
+        
+        # calculate mean dx
+        ch_links = self._grid.at_node["flow__link_to_receiver_node"][self._valid_upstream_order]
+        ch_links_valid = ch_links[ch_links != self._grid.BAD_INDEX]
+        valid_link_lengths = self._link_lengths[ch_links_valid]
+        dx_mean = valid_link_lengths.mean()
+        
+        # calculate chi:
+        for node, integrand in zip(self._valid_upstream_order, chi_integrand):
+            dstr_node = receivers[node]
+            self._chi[node] = self._chi[dstr_node] + integrand
+        self._chi *= dx_mean
+        
+        """
+         def integrate_chi_each_dx(
+            self, valid_upstr_order, chi_integrand_at_nodes, chi_array
+        ):
+        """
+
+
+        # stamp over the closed nodes, as it's possible they can receive infs
+        # if min_drainage_area < grid.cell_area_at_node
+        self._chi[self._grid.status_at_node == self._grid.BC_NODE_IS_CLOSED] = 0.0
+        self._mask[self._valid_upstream_order] = False
+        
+        #import matplotlib.pyplot as plt
+        #plt.imshow(self._chi.reshape(self._grid.shape))
+        #plt.show()
+
+
     
