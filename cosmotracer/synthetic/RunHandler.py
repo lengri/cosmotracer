@@ -339,6 +339,7 @@ class RunHandler:
     
     def run_model(
         self,
+        approximate_depth_concs: bool = False
     ):
         
         if self.model_is_complete:
@@ -381,7 +382,8 @@ class RunHandler:
                     production_rate_SLHL=self.Pdict[pathway],
                     halflife=self.t12,
                     production_pathway=pathway,
-                    attenuation_length=self.attdict[pathway]
+                    attenuation_length=self.attdict[pathway],
+                    _approximate_depth_concs=approximate_depth_concs
                 )
 
             self._save_step_to_hdf5(

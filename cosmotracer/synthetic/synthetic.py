@@ -795,6 +795,7 @@ class CosmoLEM(RasterModelGrid):
         halflife : float = np.inf,
         depth_integration : float = 1.,
         nuclide : str = "He",
+        _approximate_depth_concs: bool = False
         
     ):
         """
@@ -853,7 +854,8 @@ class CosmoLEM(RasterModelGrid):
             northings=self.y_of_node[self.tracked_nodes],
             eastings=self.x_of_node[self.tracked_nodes],
             epsg=self.epsg,
-            allow_cache=True
+            allow_cache=True,
+            depth_approximation=_approximate_depth_concs
         )
         logger.info(
             f"Calculated transient concentrations at runtime {self.step_info['T_total']}"
