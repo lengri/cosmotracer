@@ -18,7 +18,7 @@ class SteepnessInverter(Component):
     _unit_agnostic = True 
     
     _info = {
-        "channel__ksn_inv": {
+        "channel__ks_inv": {
             "dtype": float,
             "intent": "out",
             "optional": False,
@@ -32,7 +32,7 @@ class SteepnessInverter(Component):
             "optional": False,
             "units": "m",
             "mapping": "node",
-            "doc": "Elevation re-calculated from inverted ksn"
+            "doc": "Elevation re-calculated from inverted ks"
         },
          "flow__upstream_node_order": {
             "dtype": int,
@@ -76,10 +76,8 @@ class SteepnessInverter(Component):
         
         if len(self._network_ids) == 0:
             raise ValueError(
-                """
-                Network of nodes for inversion contains no valid entries! 
-                Try reducing {Acrit=:.2e}.
-                """
+                f"Network of nodes for inversion contains no valid entries! " 
+                f"Try reducing {self._Acrit=:.2e}."
             )
             
         self._n_nodes = len(self._network_ids)
@@ -89,14 +87,12 @@ class SteepnessInverter(Component):
         
         self._z = np.zeros(self._n_nodes) # Will store z values of the network
         self._z_bl = np.zeros(self._n_nodes) # Will store the baselevel of each node (outlet)
-        self._A = np.zeros((self._n_nodes, self._n_nodes)) # Inversion matrix containing deltaChi
-        self._D = np.zeros((self._n_nodes, self._n_nodes)) # Dampening matrix
         self._fill_inversion_matrices()
         
         self.alpha = regularization_coefficient
         
         # initialise fields to store results
-        self._grid.add_zeros("channel__ksn_inv", at="node")
+        self._grid.add_zeros("channel__ks_inv", at="node")
         self._grid.add_zeros("channel__z_inv", at="node")
         
     @property
@@ -111,6 +107,10 @@ class SteepnessInverter(Component):
         self._alpha = alpha
     
     def _fill_inversion_matrices(self):
+        
+        # Use sparse matrix representation!
+        rows_A, cols_A, vals_A = [], [], []
+        rows_D, cols_D, vals_D = [], [], []
     
         # loop over all ids, store Dchi of downstream nodes in A, and id/rec Dchi in D.
         for i, node in enumerate(self._network_ids):
@@ -127,8 +127,10 @@ class SteepnessInverter(Component):
             # get delta chi for this list of downstream nodes (exclude outlet node)
             dChi = self.delta_chi(rec_ids[:-1])
             
-            # place in A, use grid2mat to map the positions.
-            self._A[i,[self._grid2mat[j] for j in rec_ids[:-1]]] = dChi
+            # place in A, use grid2mat to map the positions.            
+            rows_A += [i]*len([self._grid2mat[j] for j in rec_ids[:-1]])
+            cols_A += [self._grid2mat[j] for j in rec_ids[:-1]]
+            vals_A += list(dChi)
             
             #
             # Fill z vector
@@ -155,7 +157,7 @@ class SteepnessInverter(Component):
             rec_id = self._get_receiver_id(node)
             
             # If we are a single node above the boundary, we use
-            # upstream ksn for gradient-based criterion.
+            # upstream ks for gradient-based criterion.
             # (Since we filter out channels of total length 2,
             # there must be at least one donor!)
             if rec_id == self._get_receiver_id(rec_id):
@@ -165,18 +167,25 @@ class SteepnessInverter(Component):
                 sum_donors = 0
                 
                 for j, don in enumerate(don_ids):
-                    self._D[i,self._grid2mat[don]] = 1/(nn*don_dChis[j])
                     sum_donors += 1/(nn*don_dChis[j])
-                self._D[i,self._grid2mat[node]] = -sum_donors
-            
+                    rows_D.append(i)
+                    cols_D.append(self._grid2mat[don])
+                    vals_D.append(1/(nn*don_dChis[j]))
+
+                rows_D.append(i)
+                cols_D.append(self._grid2mat[node])
+                vals_D.append(-sum_donors)
             # Other case: There are no donors! In this case, we are
             # at the headwater boundaries. Here we also use a gradient-based
             # criterion with the receiver node
             elif len(don_ids) == 0:
                 
-                self._D[i,self._grid2mat[node]] = 1/node_dChi
-                self._D[i,self._grid2mat[rec_id]] = -1/node_dChi 
-            
+                node_dChi = self.delta_chi(node)
+
+                rows_D += [i, i]
+                cols_D += [self._grid2mat[node], self._grid2mat[rec_id]]
+                vals_D += [1/node_dChi, -1/node_dChi]
+
             # Final case: we are not at lower or upper boundary!
             # Thus, there has to be one receiver and at least one
             # donor. We can use curvature here.
@@ -190,16 +199,27 @@ class SteepnessInverter(Component):
                 S = (len(don_ids) + 1) / (node_dChi + np.sum(don_dChis))
                 sum_donors = 0
                 for j, dn in enumerate(don_ids):
-                    self._D[i,self._grid2mat[dn]] = S/(nn*don_dChis[j])
                     sum_donors += S/(nn*don_dChis[j]) 
+                    rows_D.append(i)
+                    cols_D.append(self._grid2mat[dn])
+                    vals_D.append(S/(nn*don_dChis[j]))       
                 
-                # entry for node itself
-                self._D[i,self._grid2mat[node]] = -(S/(node_dChi) + sum_donors)
-                
-                # entry for downstream node
-                self._D[i,self._grid2mat[rec_id]] = S/node_dChi                
+                # Add entry for node itself and receiver
+                rows_D += [i, i]
+                cols_D += [self._grid2mat[node], self._grid2mat[rec_id]]   
+                vals_D += [-(S/(node_dChi) + sum_donors), S/node_dChi]  
                 
         print("\n")
+        
+        # build up to sparse matrices
+        self._A_sp = sp.sparse.csr_matrix(
+            (vals_A, (rows_A, cols_A)), 
+            shape=(self._n_nodes, self._n_nodes)
+        )
+        self._D_sp = sp.sparse.csr_matrix(
+            (vals_D, (rows_D, cols_D)), 
+            shape=(self._n_nodes, self._n_nodes)
+        )
     
     def invert(
         self, 
@@ -210,21 +230,26 @@ class SteepnessInverter(Component):
         regularization coefficient.
         
         This function will fill two output fields,
-        "channel__ksn_inv", and "channel__z_inv".
+        "channel__ks_inv", and "channel__z_inv".
         """
         
         if regularization_coefficient is not None:
             self.alpha = regularization_coefficient
             
-        K = np.vstack([self._A, self.alpha*self._D])
-        rhs = np.hstack([self._z, np.zeros(self._D.shape[0])])
+        K_sp = sp.sparse.vstack([self._A_sp, self.alpha*self._D_sp])
+        rhs = np.hstack([self._z, np.zeros(self._D_sp.shape[0])])
 
-        self._ks = sp.sparse.linalg.lsmr(K, rhs)[0]
-        self._grid.at_node["channel__ksn_inv"][self._network_ids] = self._ks
+        self._ks = sp.sparse.linalg.lsmr(K_sp, rhs)[0]
+        self._grid.at_node["channel__ks_inv"][self._network_ids] = self._ks
         
         # reconstruct z, recall that we subtracted the baselevel!
         self._grid.at_node["channel__z_inv"][self._network_ids] = \
-            self._A @ self._ks + self._z_bl
+            self._A_sp @ self._ks + self._z_bl
+            
+        # Problem: The outlet itself is not part of network_ids, so we need to
+        # set it to baselevel manually...
+        outlet = self._get_receiver_id(self._network_ids[0])
+        self._grid.at_node["channel__z_inv"][outlet] = self._z_bl[0]
             
         # Note, alternative way of solving using the normal equations:
         # lhs = self._A.T @ self._A + self.alpha**2 * self._D.T @ self._D
@@ -239,8 +264,8 @@ class SteepnessInverter(Component):
         # Calculates ||A ks - z||2 and ||D ks||2 as misfit and roughness of 
         # the solution (for the given alpha) respectively.
         
-        self.misfit = np.linalg.norm(self._A @ self._ks - self._z)
-        self.roughness = np.linalg.norm(self._D @ self._ks)
+        self.misfit = np.linalg.norm(self._A_sp @ self._ks - self._z)
+        self.roughness = np.linalg.norm(self._D_sp @ self._ks)
         
         return (self.misfit, self.roughness)
         
