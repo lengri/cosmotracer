@@ -2,6 +2,18 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scipy as sp
 
+def estimate_bw(x):
+    
+    n = len(x)
+    std = np.std(x)
+    q = np.quantile(x, q=[0.25, 0.75])
+    iqr = q[1]-q[0]
+    
+    A = min(std,iqr/1.34)
+
+    bw = 0.9*A*n**(-1/5)
+    
+    return bw
 
 def gaussian_kernel(x, mu, sigma):
     frac = 1.0 / (sigma * np.sqrt(2.0 * np.pi))
@@ -26,7 +38,7 @@ class SyntheticDistribution():
         self.dx = dx
         self.h_rule = h_rule
         hi = h_rule(xi)
-        self.min = max(xi.min()-hi.max()*5, 0)
+        self.min = max(xi.min()-np.abs(hi.max()*5), 0)
         self.max = xi.max()+hi.max()*5
         self.x = np.arange(self.min, self.max+dx, dx)
 
@@ -97,12 +109,15 @@ class GaussianKDE:
     def __init__(
         self,
         mu : np.ndarray,
-        error : np.ndarray,
+        error : np.ndarray | None = None,
         weights : np.ndarray | None = None,
         x : np.ndarray | None = None,
         allow_negative : bool = False        
     ):
         self.mu = mu 
+        
+        if error is None:
+            error = np.full_like(mu, estimate_bw(mu))
         self.error = error 
         
         if weights is None:
